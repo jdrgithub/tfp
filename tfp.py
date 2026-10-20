@@ -38,30 +38,30 @@ That means:
 No Terraform installed? No problem while you are learning.
 This script has a tiny fake provider built in, just for practice:
 
-    python3 tf_provider_viewer.py --demo list
-    python3 tf_provider_viewer.py --demo search fake
-    python3 tf_provider_viewer.py --demo show fake_server --show required
-    python3 tf_provider_viewer.py --self-test
+    python3 tfp.py --demo list
+    python3 tfp.py --demo search fake
+    python3 tfp.py --demo show fake_server --show required
+    python3 tfp.py --self-test
 
 Real examples (inside a real Terraform project)
 ------------------------------------------------
-    python3 tf_provider_viewer.py list
-    python3 tf_provider_viewer.py list --kind resources
-    python3 tf_provider_viewer.py list --kind datasources
+    python3 tfp.py list
+    python3 tfp.py list --kind resources
+    python3 tfp.py list --kind datasources
 
-    python3 tf_provider_viewer.py search ec2
-    python3 tf_provider_viewer.py search bucket --show optional
+    python3 tfp.py search ec2
+    python3 tfp.py search bucket --show optional
 
-    python3 tf_provider_viewer.py show aws_instance
-    python3 tf_provider_viewer.py show aws_instance --show required
-    python3 tf_provider_viewer.py show aws_instance --show optional
-    python3 tf_provider_viewer.py show aws_instance --show attributes
-    python3 tf_provider_viewer.py show aws_ami --kind datasource --show all
+    python3 tfp.py show aws_instance
+    python3 tfp.py show aws_instance --show required
+    python3 tfp.py show aws_instance --show optional
+    python3 tfp.py show aws_instance --show attributes
+    python3 tfp.py show aws_ami --kind datasource --show all
 
     # Bonus: if you saved the JSON yourself, you can read that file instead
     # of asking Terraform to produce it again:
     terraform providers schema -json > schema.json
-    python3 tf_provider_viewer.py --schema-file schema.json list
+    python3 tfp.py --schema-file schema.json list
 
 Key Terraform words used in this script
 ---------------------------------------
@@ -97,9 +97,12 @@ Only Python's standard library is used, so there is nothing to install.
 # We only import the few tools this one script needs.
 
 import argparse  # Reads command-line arguments like:  search ec2 --show required
+import contextlib  # Redirects printed output in tests so we can check it.
+import io  # In-memory text streams, used by the output tests at the end.
 import json  # Turns JSON text into Python dictionaries (and back again).
 import subprocess  # Runs another program (Terraform) from inside Python.
 import sys  # Gives us sys.exit(), and tells us how the script was started.
+import textwrap  # Wraps long text so table columns stay aligned.
 import unittest  # Helps us test our own small functions at the end of the file.
 from dataclasses import dataclass  # A tidy way to bundle related data together.
 from pathlib import Path  # A clean, modern way to work with file paths.
@@ -109,6 +112,15 @@ from pathlib import Path  # A clean, modern way to work with file paths.
 # Constants (values that never change while the script runs)
 # ---------------------------------------------------------------------------
 # By convention, constant names are written in ALL_CAPS.
+
+# Column headings for the attribute table, in display order.
+ATTRIBUTE_HEADERS = ("NAME", "TYPE", "REQUIRED", "OPTIONAL", "COMPUTED", "DESCRIPTION")
+
+# Long columns are capped so one long type or description cannot push the
+# whole table off the screen; longer text is wrapped inside its column.
+MAX_NAME_WIDTH = 30
+MAX_TYPE_WIDTH = 30
+MAX_DESCRIPTION_WIDTH = 46
 
 # The four things a user may ask us to show for one resource / data source.
 SHOW_CHOICES = ("all", "required", "optional", "attributes")
@@ -195,8 +207,8 @@ def run_terraform_schema_command() -> dict:
         raise RuntimeError(
             "Could not find the 'terraform' program.\n"
             "Install Terraform, or try the built-in practice data:\n"
-            "    python3 tf_provider_viewer.py --demo list\n"
-            "    python3 tf_provider_viewer.py --self-test"
+            "    python3 tfp.py --demo list\n"
+            "    python3 tfp.py --self-test"
         ) from None
 
     # A return code of 0 means "success".  Anything else means "it failed".
@@ -369,6 +381,47 @@ def filter_items_by_kind(
     return [item for item in items if item.kind == kind]
 
 
+def group_items_by_provider(
+    items: list[ProviderItem],
+) -> list[tuple[str, list[ProviderItem]]]:
+    """
+    Group items by provider.
+
+    Returns a list of ``(provider, items)`` pairs, ordered by provider
+    name.  Inside each group, items are ordered by kind, then by name.
+    Returning ordered groups lets the printing code show each provider
+    heading exactly once, with its items underneath it.
+    """
+    # First pass: put each item into a list for its provider.
+    items_by_provider: dict[str, list[ProviderItem]] = {}
+    for item in items:
+        items_by_provider.setdefault(item.provider, []).append(item)
+
+    # Second pass: sort the providers, and sort the items inside each one.
+    grouped_items: list[tuple[str, list[ProviderItem]]] = []
+    for provider in sorted(items_by_provider):
+        provider_items = sorted(
+            items_by_provider[provider],
+            key=lambda item: (item.kind, item.name),
+        )
+        grouped_items.append((provider, provider_items))
+    return grouped_items
+
+
+def order_items_by_provider(items: list[ProviderItem]) -> list[ProviderItem]:
+    """
+    Return one flat list in the same order used by provider-grouped output.
+
+    Menus must use this order: the number printed beside an item has to
+    select that same item when the user types the number.
+    """
+    return [
+        item
+        for _provider, provider_items in group_items_by_provider(items)
+        for item in provider_items
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Understanding one attribute / argument
 # ---------------------------------------------------------------------------
@@ -479,29 +532,56 @@ def format_type(type_value: object) -> str:
     return str(type_value)
 
 
-def describe_attribute_flags(attribute: dict) -> str:
+def build_attribute_description(attribute: dict) -> str:
     """
-    Build a short label like:  "required, sensitive"
+    Build the text for the DESCRIPTION column of one attribute.
 
-    This gives the reader the important facts on one small line.
+    This combines the provider's description with any important notes,
+    so nothing is lost when the output is shown as a table:
+
+    * sensitive values are marked ``Sensitive.``
+    * deprecated values are marked ``Deprecated: ...``
     """
-    flags: list[str] = []
+    notes: list[str] = []
 
-    # The order here is deliberate: most important fact first.
-    if is_required(attribute):
-        flags.append("required")
-    if is_optional(attribute):
-        flags.append("optional")
-    if is_computed(attribute):
-        flags.append("computed")
+    # Collapse runs of whitespace (including newlines) into single
+    # spaces, so the description fits neatly on wrapped table lines.
+    description = " ".join(str(attribute.get("description", "")).split())
+    if description:
+        notes.append(description)
+
     if attribute.get("sensitive"):
-        flags.append("sensitive")
-    if attribute.get("deprecated"):
-        flags.append("deprecated")
+        notes.append("Sensitive.")
 
-    # ", ".join(flags) sticks the pieces together with a comma and space.
-    # If there are no flags at all, we say so plainly.
-    return ", ".join(flags) if flags else "no flags"
+    deprecated = attribute.get("deprecated")
+    if isinstance(deprecated, str) and deprecated:
+        notes.append(f"Deprecated: {' '.join(deprecated.split())}")
+    elif deprecated:
+        # Sometimes the value is simply True instead of a message.
+        notes.append("Deprecated.")
+
+    return " ".join(notes)
+
+
+def build_attribute_row(name: str, attribute: dict) -> tuple[str, ...]:
+    """
+    Build one row of the attribute table.
+
+    The cells follow ATTRIBUTE_HEADERS, in the same order:
+    Name, Type, Required, Optional, Computed, Description.
+
+    The word itself goes into its own column (for example, "required"
+    appears under REQUIRED), and the other flag columns stay blank.
+    A value that is optional AND computed gets a word in both columns.
+    """
+    return (
+        name,
+        format_type(attribute.get("type", "unknown")),
+        "required" if is_required(attribute) else "",
+        "optional" if is_optional(attribute) else "",
+        "computed" if is_computed(attribute) else "",
+        build_attribute_description(attribute),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -558,45 +638,172 @@ def block_contains_computed(block: dict) -> bool:
 # Printing (turning data into text a human can read)
 # ---------------------------------------------------------------------------
 
-def print_items_list(items: list[ProviderItem], title: str) -> None:
+def get_column_widths(
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    max_widths: tuple[int | None, ...] | None = None,
+) -> list[int]:
     """
-    Print a numbered, grouped list of resources / data sources.
+    Work out how wide each table column needs to be.
 
-    Numbering matters: after a search, the user can type a number to
-    choose one of the matches.
+    A column is as wide as its widest cell (or its heading, if that is
+    wider).  Columns named in ``max_widths`` are capped at that width;
+    longer text in them is wrapped instead.  A None cap means "no cap".
+    """
+    widths: list[int] = []
+    for column_index, header in enumerate(headers):
+        # Start with the heading itself; every column is at least this wide.
+        width = len(header)
+        for row in rows:
+            width = max(width, len(row[column_index]))
+
+        # Apply the cap for this column, if one was given.
+        if max_widths is not None:
+            max_width = max_widths[column_index]
+            if max_width is not None:
+                width = min(width, max_width)
+
+        widths.append(width)
+    return widths
+
+
+def wrap_cell_text(text: str, width: int) -> list[str]:
+    """
+    Wrap one table cell into lines that fit inside ``width`` characters.
+
+    Returns a list with at least one line (an empty cell gives [""]),
+    so callers can always line cells up side by side.
+    """
+    if not text:
+        return [""]
+    # break_long_words lets one very long word (e.g. a long type name)
+    # be split instead of pushing the whole table sideways.
+    wrapped = textwrap.wrap(
+        text,
+        width=max(width, 1),
+        break_long_words=True,
+        break_on_hyphens=False,
+    )
+    return wrapped if wrapped else [""]
+
+
+def print_table(
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    indent: str = "",
+    max_widths: tuple[int | None, ...] | None = None,
+) -> None:
+    """
+    Print a simple aligned text table.
+
+    Columns are separated by two spaces.  Cells that are too long for
+    their column are wrapped: the extra text appears on the lines
+    below, still inside the same column, with the other columns blank.
+    """
+    widths = get_column_widths(headers, rows, max_widths)
+
+    def format_cells(cells: tuple[str, ...] | list[str]) -> str:
+        # .ljust(width) pads a cell with spaces up to the column width.
+        # .rstrip() removes trailing spaces from the end of the line.
+        return indent + "  ".join(
+            cell.ljust(width) for cell, width in zip(cells, widths)
+        ).rstrip()
+
+    # Heading row, e.g. NAME  TYPE  REQUIRED ...
+    print(format_cells(headers))
+
+    # A separator line of dashes, one run per column.
+    print(format_cells(tuple("-" * width for width in widths)))
+
+    for row in rows:
+        # Wrap every cell, then print as many physical lines as the
+        # tallest (most wrapped) cell needs.
+        wrapped_cells = [
+            wrap_cell_text(cell, width) for cell, width in zip(row, widths)
+        ]
+        line_count = max(len(cell_lines) for cell_lines in wrapped_cells)
+        for line_index in range(line_count):
+            line_cells = [
+                cell_lines[line_index] if line_index < len(cell_lines) else ""
+                for cell_lines in wrapped_cells
+            ]
+            print(format_cells(line_cells))
+
+
+def print_provider_heading(provider: str) -> None:
+    """
+    Print the heading that starts one provider's section.
+
+    This is printed once per provider, so individual rows and items do
+    not need to repeat the provider name over and over.
+    """
+    print(f"\nProvider: {provider}")
+
+
+def print_items_list(items: list[ProviderItem], title: str) -> list[ProviderItem]:
+    """
+    Print a numbered list of resources / data sources, grouped by provider.
+
+    Each provider's name is printed once, as a heading above its items.
+    Items appear in columns (number, kind, name) under that heading.
+
+    Returns the items in the order they were displayed.  Numbering
+    matters: after a search, the user can type a number to choose one
+    of the matches, so the returned order must match the printed order.
     """
     print(title)
     print("-" * len(title))
 
-    if not items:
-        print("  (nothing found)")
-        return
+    # Remember the displayed order, so callers can map a typed number
+    # back to exactly the item that was printed beside that number.
+    displayed_items = order_items_by_provider(items)
 
-    # enumerate(..., start=1) counts 1, 2, 3, ... while looping.
-    # Humans prefer starting at 1; computers often start at 0.
-    for number, item in enumerate(items, start=1):
-        print(f"{number:>3}. [{item.kind}] {item.name}  (provider: {item.provider})")
+    if not displayed_items:
+        print("  (nothing found)")
+        return displayed_items
+
+    number = 1
+    for provider, provider_items in group_items_by_provider(items):
+        print_provider_heading(provider)
+
+        # Build this provider's rows.  The number keeps counting up
+        # across providers, so every printed number is unique.
+        rows: list[tuple[str, ...]] = []
+        for item in provider_items:
+            rows.append((str(number), item.kind, item.name))
+            number += 1
+
+        print_table(("NUMBER", "KIND", "NAME"), rows)
 
     # An f-string (f"...") places values inside text using {curly braces}.
-    print(f"\nTotal: {len(items)}")
+    print(f"\nTotal: {len(displayed_items)}")
+    return displayed_items
 
 
-def print_one_attribute(name: str, attribute: dict, indent: str) -> None:
-    """Print exactly one attribute, with its type, flags and description."""
-    type_text = format_type(attribute.get("type", "unknown"))
-    flags_text = describe_attribute_flags(attribute)
+def print_attribute_table(attributes: dict, indent_level: int = 0) -> None:
+    """
+    Print attributes as an aligned table.
 
-    # Main line, e.g. "  - instance_type : string  (optional)"
-    print(f"{indent}- {name} : {type_text}  ({flags_text})")
-
-    # Optional extra lines.  We only print them when they exist.
-    description = attribute.get("description")
-    if description:
-        print(f"{indent}    {description}")
-
-    deprecated = attribute.get("deprecated")
-    if deprecated:
-        print(f"{indent}    Deprecated: {deprecated}")
+    Columns: NAME, TYPE, REQUIRED, OPTIONAL, COMPUTED, DESCRIPTION.
+    Long types and descriptions are wrapped inside their own column.
+    """
+    rows = [
+        build_attribute_row(name, attributes[name])
+        for name in sorted(attributes)
+    ]
+    print_table(
+        ATTRIBUTE_HEADERS,
+        rows,
+        indent="  " * indent_level,
+        max_widths=(
+            MAX_NAME_WIDTH,
+            MAX_TYPE_WIDTH,
+            None,  # REQUIRED is always short; no cap needed.
+            None,  # OPTIONAL
+            None,  # COMPUTED
+            MAX_DESCRIPTION_WIDTH,
+        ),
+    )
 
 
 def print_block(block: dict, show: str, indent_level: int = 0) -> None:
@@ -615,9 +822,8 @@ def print_block(block: dict, show: str, indent_level: int = 0) -> None:
 
     if visible_attributes:
         print(f"{indent}Arguments / attributes:")
-        # Sorting the names alphabetically makes the output predictable.
-        for name in sorted(visible_attributes):
-            print_one_attribute(name, visible_attributes[name], indent + "  ")
+        # The table sorts the names alphabetically, one attribute per row.
+        print_attribute_table(visible_attributes, indent_level)
     elif indent_level == 0:
         # Only say this at the top level, so nested output stays quiet.
         print(f"{indent}(no entries match --show {show})")
@@ -660,9 +866,14 @@ def print_block(block: dict, show: str, indent_level: int = 0) -> None:
 
 
 def print_item_details(item: ProviderItem, show: str) -> None:
-    """Print a clear heading, then the chosen details for one item."""
+    """
+    Print a clear heading, then the chosen details for one item.
+
+    The provider is deliberately NOT printed here: callers print it
+    once, as a section heading above one or more items.
+    """
     # A line of "=" characters, as long as the heading text.
-    heading = f"{item.name}  [{item.kind}]  (provider: {item.provider})"
+    heading = f"{item.name}  [{item.kind}]"
     print()
     print(heading)
     print("=" * len(heading))
@@ -756,17 +967,22 @@ def handle_search(
         print(f"No resources or data sources match: {keyword!r}")
         return 0
 
-    print_items_list(matches, f"Search results for: {keyword!r}")
+    # print_items_list returns the items in displayed (grouped) order.
+    # The chooser must use that same order, so a typed number selects
+    # the item that was printed beside that number.
+    displayed_matches = print_items_list(matches, f"Search results for: {keyword!r}")
 
     # If the user did not ask to view details, our work is done.
     if show is None:
         print("\nTip: add --show required (for example) to view one of these.")
         return 0
 
-    chosen = choose_item_from_list(matches)
+    chosen = choose_item_from_list(displayed_matches)
     if chosen is None:
         return 0
 
+    # The provider heading was already printed above, in the results
+    # list, so the details do not repeat it.
     print_item_details(chosen, show)
     return 0
 
@@ -787,10 +1003,13 @@ def handle_show(
     exact_matches = filter_items_by_kind(find_exact_items(items, name), kind)
 
     if exact_matches:
-        # The same name can exist as a resource AND a data source.
-        # In that case, show each one, clearly labelled.
-        for item in exact_matches:
-            print_item_details(item, show)
+        # The same name can exist as a resource AND a data source, and
+        # even in more than one provider.  Group by provider so each
+        # provider heading is printed once, above its own items.
+        for provider, provider_items in group_items_by_provider(exact_matches):
+            print_provider_heading(provider)
+            for item in provider_items:
+                print_item_details(item, show)
         return 0
 
     # No exact match: be helpful and offer the closest keyword matches.
@@ -802,9 +1021,9 @@ def handle_show(
         return 0
 
     print("\nDid you mean one of these?")
-    print_items_list(suggestions, "Similar names")
+    displayed_suggestions = print_items_list(suggestions, "Similar names")
 
-    chosen = choose_item_from_list(suggestions)
+    chosen = choose_item_from_list(displayed_suggestions)
     if chosen is not None:
         print_item_details(chosen, show)
     return 0
@@ -840,7 +1059,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Global options.  These go BEFORE the command word, e.g.
-    #   python3 tf_provider_viewer.py --demo list
+    #   python3 tfp.py --demo list
     parser.add_argument(
         "--schema-file",
         metavar="PATH",
@@ -988,7 +1207,7 @@ def main(argv: list[str] | None = None) -> int:
 # work correctly.  None of it is needed during normal use.
 #
 # Run the tests with:
-#     python3 tf_provider_viewer.py --self-test
+#     python3 tfp.py --self-test
 #
 # How to read these tests:
 # * Each test is a small method whose name starts with "test_".
@@ -1107,6 +1326,57 @@ def make_fake_schema() -> dict:
     }
 
 
+def make_multi_provider_schema() -> dict:
+    """
+    Build a fake schema with TWO providers, for grouping tests.
+
+    Both providers contain a ``shared_thing`` resource, so tests can
+    check that a name found in two providers gets one provider heading
+    per provider -- not one heading per item.
+    """
+
+    def simple_block() -> dict:
+        # A tiny block with one computed ``id`` is enough for grouping tests.
+        return {"attributes": {"id": {"type": "string", "computed": True}}}
+
+    return {
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/example/alpha": {
+                "resource_schemas": {
+                    "alpha_server": {"block": simple_block()},
+                    "shared_thing": {"block": simple_block()},
+                },
+                "data_source_schemas": {
+                    "alpha_image": {"block": simple_block()},
+                },
+            },
+            "registry.terraform.io/example/beta": {
+                "resource_schemas": {
+                    "beta_server": {"block": simple_block()},
+                    "shared_thing": {"block": simple_block()},
+                },
+                "data_source_schemas": {
+                    "beta_image": {"block": simple_block()},
+                },
+            },
+        },
+    }
+
+
+def capture_output(function, *args, **kwargs):
+    """
+    Run a printing function and capture everything it prints.
+
+    Returns ``(result, printed_text)``.  This lets tests check the exact
+    text a user would see, without printing it during the test run.
+    """
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        result = function(*args, **kwargs)
+    return result, stream.getvalue()
+
+
 class TestFormatType(unittest.TestCase):
     """Tests for format_type(): turning JSON types into readable text."""
 
@@ -1212,6 +1482,179 @@ class TestFiltering(unittest.TestCase):
         self.assertFalse(block_type_matches_show(disk_block_type, "optional"))
 
 
+class TestGrouping(unittest.TestCase):
+    """Tests for group_items_by_provider() and order_items_by_provider()."""
+
+    def setUp(self):
+        self.items = collect_items(make_multi_provider_schema())
+
+    def test_groups_are_ordered_by_provider(self):
+        groups = group_items_by_provider(self.items)
+        self.assertEqual(
+            [provider for provider, _items in groups],
+            ["alpha", "beta"],
+        )
+
+    def test_items_inside_a_group_are_ordered_by_kind_then_name(self):
+        groups = dict(group_items_by_provider(self.items))
+        self.assertEqual(
+            [item.name for item in groups["alpha"]],
+            ["alpha_image", "alpha_server", "shared_thing"],
+        )
+
+    def test_flat_order_matches_grouped_display_order(self):
+        ordered = order_items_by_provider(self.items)
+        self.assertEqual(
+            [(item.provider, item.name) for item in ordered],
+            [
+                ("alpha", "alpha_image"),
+                ("alpha", "alpha_server"),
+                ("alpha", "shared_thing"),
+                ("beta", "beta_image"),
+                ("beta", "beta_server"),
+                ("beta", "shared_thing"),
+            ],
+        )
+
+
+class TestPrintedOutput(unittest.TestCase):
+    """Tests that capture printed output and check its layout."""
+
+    def test_list_prints_each_provider_heading_once(self):
+        items = collect_items(make_multi_provider_schema())
+        displayed, output = capture_output(print_items_list, items, "Listing: all")
+
+        # One heading per provider, and no per-row provider text.
+        self.assertEqual(output.count("Provider: alpha"), 1)
+        self.assertEqual(output.count("Provider: beta"), 1)
+        self.assertNotIn("(provider:", output)
+
+        # Items appear under the correct provider heading.
+        self.assertLess(output.index("Provider: alpha"), output.index("alpha_server"))
+        self.assertLess(output.index("alpha_server"), output.index("Provider: beta"))
+        self.assertLess(output.index("Provider: beta"), output.index("beta_server"))
+
+        # The list is printed in columns.
+        self.assertIn("NUMBER", output)
+        self.assertIn("KIND", output)
+        self.assertIn("NAME", output)
+        self.assertEqual(len(displayed), 6)
+
+    def test_printed_numbers_select_the_same_items(self):
+        items = collect_items(make_multi_provider_schema())
+        displayed, output = capture_output(print_items_list, items, "Listing: all")
+
+        # Read the printed rows back: number, kind, name.
+        printed_rows = {}
+        for line in output.splitlines():
+            parts = line.split()
+            if parts and parts[0].isdigit():
+                printed_rows[int(parts[0])] = parts[2]
+
+        # Choosing printed number N must select displayed_items[N - 1].
+        for number, name in printed_rows.items():
+            self.assertEqual(displayed[number - 1].name, name)
+
+    def test_show_prints_provider_once_for_a_single_provider(self):
+        items = collect_items(make_fake_schema())
+        _result, output = capture_output(handle_show, items, "fake_server", None, "all")
+        self.assertEqual(output.count("Provider: fake"), 1)
+        self.assertNotIn("(provider:", output)
+
+    def test_show_groups_same_name_from_two_providers(self):
+        items = collect_items(make_multi_provider_schema())
+        _result, output = capture_output(handle_show, items, "shared_thing", None, "all")
+
+        # One heading per provider; the shared name appears once per provider.
+        self.assertEqual(output.count("Provider: alpha"), 1)
+        self.assertEqual(output.count("Provider: beta"), 1)
+        self.assertEqual(output.count("shared_thing  [resource]"), 2)
+
+    def test_attribute_columns_put_flag_words_in_the_right_columns(self):
+        items = collect_items(make_fake_schema())
+        server = find_exact_items(items, "fake_server")[0]
+        _result, output = capture_output(print_item_details, server, "all")
+        lines = output.splitlines()
+
+        # Find the (first) column heading line and note where each
+        # flag column starts.
+        header = next(line for line in lines if line.startswith("NAME"))
+        required_at = header.index("REQUIRED")
+        optional_at = header.index("OPTIONAL")
+        computed_at = header.index("COMPUTED")
+        self.assertIn("DESCRIPTION", header)
+
+        def row_starting_with(name: str) -> str:
+            return next(
+                line for line in lines if line.startswith(f"{name} ")
+            )
+
+        # Each flag word starts exactly under its own heading.
+        name_row = row_starting_with("name")
+        self.assertEqual(name_row.index("required"), required_at)
+
+        # "tags" is optional AND computed: both words, both columns.
+        tags_row = row_starting_with("tags")
+        self.assertEqual(tags_row.index("optional"), optional_at)
+        self.assertEqual(tags_row.index("computed"), computed_at)
+
+        id_row = row_starting_with("id")
+        self.assertEqual(id_row.index("computed"), computed_at)
+
+    def test_long_description_wraps_inside_the_description_column(self):
+        long_description = (
+            "This is a deliberately long description that cannot fit "
+            "inside one description column, so it must wrap neatly."
+        )
+        item = ProviderItem(
+            name="long_server",
+            kind="resource",
+            provider="fake",
+            block={
+                "attributes": {
+                    "setting": {
+                        "type": "string",
+                        "optional": True,
+                        "description": long_description,
+                    }
+                }
+            },
+        )
+        _result, output = capture_output(print_item_details, item, "all")
+        lines = output.splitlines()
+        header = next(line for line in lines if line.startswith("NAME"))
+        description_at = header.index("DESCRIPTION")
+
+        # The first row line carries the start of the description...
+        row_index = next(
+            index for index, line in enumerate(lines) if line.startswith("setting ")
+        )
+        self.assertIn("deliberately", lines[row_index])
+
+        # ...and a continuation line follows, with text only in the
+        # description column (everything before it is blank).
+        continuation = lines[row_index + 1]
+        self.assertTrue(continuation[description_at:].strip())
+        self.assertEqual(continuation[:description_at].strip(), "")
+
+    def test_nested_block_attributes_use_an_indented_table(self):
+        items = collect_items(make_fake_schema())
+        server = find_exact_items(items, "fake_server")[0]
+        _result, output = capture_output(print_item_details, server, "all")
+        lines = output.splitlines()
+
+        # The nested "disk" block contains "gb": its row is indented,
+        # and an indented column heading appears before it.
+        gb_line = next(line for line in lines if line.strip().startswith("gb "))
+        self.assertTrue(gb_line.startswith("    "))
+
+        header_lines = [
+            line for line in lines if line.strip().startswith("NAME")
+        ]
+        self.assertEqual(len(header_lines), 2)  # top level + nested block
+        self.assertTrue(header_lines[1].startswith("    "))
+
+
 def run_self_tests() -> int:
     """
     Run every test class above and return an exit code.
@@ -1223,7 +1666,14 @@ def run_self_tests() -> int:
     # Listing them explicitly keeps it obvious which tests will run.
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for test_class in (TestFormatType, TestCollectAndSearch, TestFiltering):
+    test_classes = (
+        TestFormatType,
+        TestCollectAndSearch,
+        TestFiltering,
+        TestGrouping,
+        TestPrintedOutput,
+    )
+    for test_class in test_classes:
         suite.addTests(loader.loadTestsFromTestCase(test_class))
 
     # verbosity=2 prints one line per test, so you can see each result.
@@ -1237,7 +1687,7 @@ def run_self_tests() -> int:
 # ---------------------------------------------------------------------------
 # Program entry point (this MUST stay at the very bottom of the file)
 # ---------------------------------------------------------------------------
-# When you run "python3 tf_provider_viewer.py ...", Python sets the special
+# When you run "python3 tfp.py ...", Python sets the special
 # variable __name__ to "__main__", so the code below runs.
 # When another file imports this one (as the tests could), __name__ is the
 # file's name instead, and nothing runs automatically.  That is exactly
