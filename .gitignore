@@ -1,0 +1,6 @@
+# Python bytecode — generated at runtime, never commit these.
+# They differ between Python versions/implementations and
+# clutter diffs. Python regenerates them automatically.
+__pycache__/
+*.py[cod]
+*$py.class
