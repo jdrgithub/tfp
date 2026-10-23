@@ -147,4 +147,52 @@ tfview --schema-file schema.json list
 | `--self-test` | Run built-in tests |
 | `--help` | Help |
 
+## Terraform Provider Schema Queries
+
+The core functionality of this script is built on the terraform provider CLI command and it's JSON output.
+
+Use `terraform providers schema -json` with `jq` to inspect resource definitions, attributes, and requirements from an installed Terraform provider.
+
+The examples below use the AWS provider.
+
+## List All Resources
+
+List all resource types supported by the AWS provider.
+
+```bash
+terraform providers schema -json | jq -r '
+  .provider_schemas["registry.terraform.io/hashicorp/aws"]
+  .resource_schemas
+  | keys[]
+'
+```
+
+## List All Attributes for a Resource
+
+List the attributes defined for a specific resource, such as `aws_s3_bucket`.
+
+```bash
+terraform providers schema -json | jq -r '
+  .provider_schemas["registry.terraform.io/hashicorp/aws"]
+  .resource_schemas["aws_s3_bucket"]
+  .block.attributes
+  | keys[]
+'
+```
+
+## List Only Required Attributes
+
+List attributes marked as required for a resource, such as `aws_instance`.
+
+```bash
+terraform providers schema -json | jq -r '
+  .provider_schemas["registry.terraform.io/hashicorp/aws"]
+  .resource_schemas["aws_instance"]
+  .block.attributes
+  | to_entries[]
+  | select(.value.required == true)
+  | .key
+'
+```
+## Here is a map to what's in the code
 Code layout: [CODE_GUIDE.md](CODE_GUIDE.md).
