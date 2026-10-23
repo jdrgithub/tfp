@@ -6,9 +6,10 @@ Terraform provider settings from the terminal.
 Instead of digging through provider web pages or huge JSON files by hand,
 you can:
 
-1. List every resource and data source in a provider.
-2. Search resources and data sources by a keyword, for example `ec2` or `bucket`.
-3. View one exact resource or data source, for example `aws_instance`.
+1. List resources, data sources, ephemeral resources and provider-defined functions.
+2. Search by a keyword, for example `ec2` or `bucket`.
+3. View one exact item, for example `aws_instance`, or a provider’s own
+   configuration with `provider aws`.
 4. Choose what to view for it:
    - `all` — every argument
    - `required` — only arguments you **must** set
@@ -35,11 +36,12 @@ clarifying question):
 - **Search:** list every matching resource and data source, then let the
   user pick one by number when details were requested.
 - **Nested blocks:** show nested blocks recursively, indented, with
-  required / optional filtering at each level.
+  required / optional filtering at each level, grouped by purpose and
+  explained in plain language (see “How nested blocks are presented”).
 - **Output:** plain terminal text in aligned columns. Each provider is
-  named once, as a heading at the top of its section, and arguments are
-  shown with separate Name, Type, Required, Optional, Computed, and
-  Description columns.
+  named once, as a heading at the top of its section. Flag columns use
+  short headings (`REQ` / `OPT` / `COMP` / `SENS`) with an `X` marker,
+  and each column is sized to the widest entry so every row lines up.
 - **Tests:** a small built-in fake schema with `unittest` tests at the end
   of the file, run via `--self-test`.
 
@@ -70,6 +72,10 @@ python3 tfp.py --demo show fake_server --show all
 python3 tfp.py --demo show fake_server --show required
 python3 tfp.py --demo show fake_server --show optional
 python3 tfp.py --demo show fake_server --show attributes
+python3 tfp.py --demo provider fake
+python3 tfp.py --demo list --kind functions
+python3 tfp.py --demo show cidr_contains --kind function
+python3 tfp.py --demo list --kind ephemerals
 ```
 
 Notes on these examples:
@@ -83,7 +89,7 @@ Notes on these examples:
 
 Verified behaviour:
 
-- All 27 built-in tests pass.
+- All 42 built-in tests pass.
 - Results are grouped by provider: each provider name is printed once,
   as a heading at the top of its section, instead of being repeated on
   every row. A new heading only appears when the output moves to a
@@ -107,51 +113,182 @@ Listing: all
 
 Provider: fake
 NUMBER  KIND        NAME
-------  ----------  -----------
+------  ----------  -------------------
 1       datasource  fake_image
-2       resource    fake_bucket
-3       resource    fake_server
+2       ephemeral   temporary_password
+3       resource    fake_bucket
+4       resource    fake_server
 
-Total: 3
+Total: 4
 ```
 
 The numbering keeps counting across providers, and typing a number
 after a search always selects the item printed beside that number.
 
 `show` prints the provider once at the top, then one table per block.
-Each argument / attribute has its own columns for its name, its type,
-and whether it is required, optional, and/or computed — the word itself
-appears in the matching column. A value that is optional *and* computed
-gets a word in both columns. Long types and descriptions wrap inside
-their own column, and sensitive / deprecated notes are included in the
-description:
+Flag columns use short headings and an `X` marker (blank means no).
+A value that is optional *and* computed gets an `X` in both `OPT` and
+`COMP`. Column widths grow to the widest entry in the table so short
+and long names stay aligned. Only the description column wraps.
 
 ```text
 Provider: fake
 
 fake_server  [resource]
 =======================
+Schema version: 0
 Showing: all
 
 Arguments / attributes:
-NAME        TYPE           REQUIRED  OPTIONAL  COMPUTED  DESCRIPTION
-----------  -------------  --------  --------  --------  -----------------------
-id          string                             computed
-ip_address  string                             computed
-name        string         required                      The name of the server.
-size        string                   optional            How big the server is.
-tags        map of string            optional  computed
-Nested blocks:
-  - disk : block (list, min: 1)
-    Arguments / attributes:
-    NAME   TYPE    REQUIRED  OPTIONAL  COMPUTED  DESCRIPTION
-    -----  ------  --------  --------  --------  -----------
-    gb     number  required
-    label  string            optional
+Markers: X = yes  (REQ = required, OPT = optional, COMP = computed, SENS = sensitive)
+NAME        TYPE           REQ  OPT  COMP  SENS  DESCRIPTION
+----------  -------------  ---  ---  ----  ----  -----------------------
+endpoint    object              X    X           Endpoint settings.
+id          string                   X
+ip_address  string                   X
+name        string         X                     The name of the server.
+size        string              X                How big the server is.
+tags        map of string       X    X
+
+Nested attributes under "endpoint" (object):
+Markers: X = yes  (REQ = required, OPT = optional, COMP = computed, SENS = sensitive)
+NAME    TYPE    REQ  OPT  COMP  SENS  DESCRIPTION
+------  ------  ---  ---  ----  ----  ------------
+host    string       X    X           Host name.
+port    number       X    X           Port number.
+secure  bool         X                Use TLS.
 ```
 
-Nested blocks keep their own indented table with the same columns, so
-the nesting stays visible.
+Nested blocks and nested attributes keep their own indented tables with
+the same columns, so the nesting stays visible.
+
+## How nested blocks are presented
+
+A nested block is configuration written as `name { ... }` instead of
+`name = value`. Providers describe these in their schema with raw
+cardinality data such as `set, min: 0`. The script translates that into
+plain language and groups blocks by purpose:
+
+- **Nested configuration blocks** — ordinary provider-defined blocks.
+- **Lookup filter blocks** — a data-source `filter` block.
+- **Provider operation timeouts** — a `timeouts` block.
+
+Each block shows whether it is optional or required, whether it may be
+repeated, what it is for, and — for `filter` and `timeouts` — a small
+HCL example. If a block is optional, its fields are headed
+“Fields — required only if you write this block:”, because a field
+marked `required` there is only required once you choose to use that
+block.
+
+For example, `aws_security_group` used as a data source has both of
+these special blocks. Neither is a property of the security group
+itself:
+
+- `filter` narrows the lookup for an existing security group, using
+  AWS filter names such as `tag:Name` or `vpc-id`. It does not change
+  the security group.
+- `timeouts` controls how long Terraform waits for the read operation.
+  Most users never need to set it.
+
+```hcl
+data "aws_security_group" "example" {
+  filter {
+    name   = "tag:Name"
+    values = ["web-server"]
+  }
+
+  timeouts {
+    read = "5m"
+  }
+}
+```
+
+In the output, those blocks look like this (abbreviated):
+
+```text
+Lookup filter blocks:
+---------------------
+  filter
+  Optional block; may be repeated. Each block must be unique.
+  Purpose:
+    Narrows the data-source lookup using provider filter names, such as
+    "tag:Name" or "vpc-id". This does not change the object itself.
+  Written as:
+    filter {
+      name   = "tag:Name"
+      values = ["example"]
+    }
+  Fields — required only if you write this block:
+    NAME    TYPE           REQ  OPT  COMP  SENS  DESCRIPTION
+    ------  -------------  ---  ---  ----  ----  -----------
+    name    string         X
+    values  set of string  X
+
+Provider operation timeouts:
+----------------------------
+  timeouts
+  Optional block; may appear at most once.
+  Purpose:
+    Controls how long Terraform waits for provider operations. Field values are
+    durations, such as "5m". This is not a property of the object itself, and
+    most users do not need to set it.
+  Written as:
+    timeouts {
+      read = "5m"
+    }
+  Fields — required only if you write this block:
+    NAME  TYPE    REQ  OPT  COMP  SENS  DESCRIPTION
+    ----  ------  ---  ---  ----  ----  -----------
+    read  string       X
+```
+
+For a data source, the top-level table is also introduced as
+“Lookup arguments and returned attributes”, with a note that
+`optional` values can be used to find the object and `computed` values
+are returned from the object that was found.
+
+## Provider configuration, functions and ephemerals
+
+View a provider’s own configuration (the arguments inside
+`provider "aws" { ... }`):
+
+```bash
+python3 tfp.py --demo provider fake
+python3 tfp.py provider aws --show required
+```
+
+```text
+Provider: fake
+
+Provider configuration  [provider]
+==================================
+Showing: all
+
+Configuration arguments:
+Markers: X = yes  (REQ = required, OPT = optional, COMP = computed, SENS = sensitive)
+NAME                 TYPE            REQ  OPT  COMP  SENS  DESCRIPTION
+-------------------  --------------  ---  ---  ----  ----  -----------------------------
+access_key           string               X          X     Static access key.
+region               string               X                AWS region to use.
+shared_config_files  list of string       X                Paths to shared config files.
+```
+
+List and show provider-defined functions and ephemeral resources:
+
+```bash
+python3 tfp.py --demo list --kind functions
+python3 tfp.py --demo show cidr_contains --kind function
+python3 tfp.py --demo list --kind ephemerals
+python3 tfp.py --demo show temporary_password --kind ephemeral
+```
+
+Ephemeral resources print a note that their values exist only during the
+Terraform operation and are not saved in state or plan files.
+
+`nested_type` attributes (provider-framework nested objects) are expanded
+under their parent with the same columns, for example
+`Nested attributes under "endpoint" (object):`. That is separate from
+`block_types`, which are nested HCL blocks written as `name { ... }`.
 
 ## Running it from any Terraform folder
 
@@ -271,9 +408,10 @@ Note: global options such as `--demo`, `--schema-file`, and
 
 | Command | What it does |
 | --- | --- |
-| `list [--kind all\|resources\|datasources]` | List resources and/or data sources (default: `all`) |
-| `search KEYWORD [--show all\|required\|optional\|attributes]` | List names containing `KEYWORD` (case-insensitive). With `--show`, pick a match by number and view it. Without `--show`, only the list is printed. |
-| `show NAME [--kind resource\|datasource] [--show ...]` | View one exact name (default `--show`: `all`). `--kind` disambiguates a name that exists as both a resource and a data source; without it, both are shown. |
+| `list [--kind all\|resources\|datasources\|ephemerals\|functions]` | List items (default `all` = resources, datasources, ephemerals; use `--kind functions` for provider functions) |
+| `search KEYWORD [--show ...]` | List names containing `KEYWORD` (case-insensitive). With `--show`, pick a match by number and view it. |
+| `show NAME [--kind resource\|datasource\|ephemeral\|function] [--show ...]` | View one exact name (default `--show`: `all`) |
+| `provider NAME [--show ...]` | View a provider’s own configuration arguments |
 | `--demo ...` | Use the tiny built-in fake provider instead of Terraform |
 | `--schema-file PATH ...` | Read a saved `terraform providers schema -json` file |
 | `--self-test` | Run the built-in tests at the end of the file, then exit |
@@ -290,14 +428,18 @@ Note: global options such as `--demo`, `--schema-file`, and
   it reads or creates the thing. In the JSON this is called `computed`.
 - **Block:** a nested group of arguments, e.g. `ebs_block_device { ... }`
   inside `aws_instance`. In the JSON these are `block_types`.
+- **Ephemeral resource:** like a resource/data source whose values exist
+  only during a Terraform operation and are not saved in state or plan files.
+- **Provider-defined function:** a function supplied by the provider and
+  callable from Terraform expressions.
 
 ### One nuance worth knowing
 
 A value can be both **optional** and **computed** at the same time: you
 may set it, and Terraform may also fill it in for you. Such a value (for
 example `tags` in the demo data) legitimately appears in both the
-`optional` view and the `attributes` view. That is real provider
-behaviour, not a bug.
+`optional` view and the `attributes` view — with an `X` under both
+`OPT` and `COMP`. That is real provider behaviour, not a bug.
 
 ## How the code is organized
 
@@ -309,9 +451,11 @@ good map for reading the code from top to bottom:
   - `load_schema_from_file()` — reads a saved JSON file
   - `load_schema()` — picks exactly one of the above (or the demo data)
 - **Reading the schema** — finding things inside the raw data
-  - `collect_items()` — gathers every resource / data source into a tidy list
-  - `search_items()` — case-insensitive keyword search
-  - `find_exact_items()` — exact-name lookup
+  - `collect_items()` — gathers resources, data sources and ephemerals
+  - `collect_provider_configs()` — gathers each provider’s own config block
+  - `collect_functions()` — gathers provider-defined functions
+  - `search_items()` / `search_functions()` — case-insensitive keyword search
+  - `find_exact_items()` / `find_exact_functions()` — exact-name lookup
   - `group_items_by_provider()` — groups items by provider, ordered by
     provider, then kind, then name
   - `order_items_by_provider()` — the same grouped order as one flat
@@ -319,46 +463,60 @@ good map for reading the code from top to bottom:
   - `get_short_provider_name()` — turns
     `registry.terraform.io/hashicorp/aws` into `aws`
 - **Understanding one attribute**
-  - `is_required()` / `is_optional()` / `is_computed()` — tiny True/False checks
+  - `is_required()` / `is_optional()` / `is_computed()` / `is_sensitive()` —
+    tiny True/False checks
   - `filter_attributes()` — keeps only the attributes for a `--show` choice
-  - `format_type()` — turns JSON types into readable text, recursively,
-    e.g. `["list", "string"]` becomes `list of string`, and
-    `["object", {"id": "string"}]` becomes `object({id = string})`
-  - `build_attribute_row()` — builds one table row: name, type, and the
-    words `required` / `optional` / `computed` in their own columns
+  - `format_type()` / `format_attribute_type()` / `format_nested_type_name()` —
+    turn JSON types (including `nested_type`) into readable text
+  - `build_attribute_row()` — builds one table row with `X` markers under
+    `REQ` / `OPT` / `COMP` / `SENS`
   - `build_attribute_description()` — the description text for a row,
-    including sensitive and deprecated notes
+    including deprecated notes
   - `block_type_matches_show()` / `block_contains_computed()` — decide
     whether nested blocks belong in the current view
+  - `describe_block_cardinality()` — translates raw schema cardinality
+    (`set`, `min_items`, `max_items`) into plain language such as
+    “Optional block; may be repeated. Each block must be unique.”
+  - `classify_block()` / `get_block_purpose()` /
+    `build_block_example_lines()` — classify blocks as configuration,
+    data-source lookup filters, or provider operation timeouts, explain
+    what they are for, and build small HCL examples for `filter` and
+    `timeouts`
 - **Printing** — turning data into human-readable text
   - `print_provider_heading()` — prints `Provider: <name>` once per section
   - `print_table()` — prints an aligned table, wrapping long cells
     inside their column (`get_column_widths()`, `wrap_cell_text()`)
   - `print_items_list()` — numbered, columned list of resources / data
     sources, grouped under provider headings; returns the displayed order
-  - `print_attribute_table()` — attributes in NAME / TYPE / REQUIRED /
-    OPTIONAL / COMPUTED / DESCRIPTION columns
+  - `print_attribute_table()` — attributes in NAME / TYPE / REQ / OPT /
+    COMP / SENS / DESCRIPTION columns, with an `X`-marker legend
+  - `print_nested_attributes()` — expands `nested_type` fields under
+    their parent attribute
   - `print_block()` — recursive, indented printing of a block and its
-    nested blocks, each with its own attribute table
-  - `print_item_details()` — heading plus details for one item (the
-    provider heading is printed by the caller, once per section)
+    nested blocks, grouped by purpose (configuration, lookup filters,
+    timeouts), each explained in plain language with its own table
+  - `print_one_block_type()` — one nested block: name, cardinality,
+    purpose, optional HCL example, and its fields
+  - `print_item_details()` / `print_item_metadata()` — heading, optional
+    description/deprecation/schema-version lines, and details
+  - `print_function_details()` — function summary, parameters and return type
   - `choose_item_from_list()` — asks the user to pick a number
 - **Command handlers** — one small function per command
-  - `handle_list()`, `handle_search()`, `handle_show()`
+  - `handle_list()`, `handle_search()`, `handle_show()`, `handle_provider()`
 - **Command-line interface**
-  - `build_parser()` — builds the `argparse` parser (`list` / `search` / `show`)
+  - `build_parser()` — builds the `argparse` parser
+    (`list` / `search` / `show` / `provider`)
   - `main()` — the starting point; loads data once and calls one handler
 - **Tests (at the end of the file)**
-  - `make_fake_schema()` — a tiny fake provider containing the interesting
-    cases: required, optional, computed, optional-and-computed, a nested
-    block with a required value inside it, a data source, and a second
-    resource so searches can return more than one match
+  - `make_fake_schema()` — a tiny fake provider covering provider config,
+    nested blocks, nested attributes, metadata, functions and ephemerals
   - `make_multi_provider_schema()` — a test-only schema with two
     providers sharing a resource name, used by the grouping tests
   - `TestFormatType`, `TestCollectAndSearch`, `TestFiltering`,
-    `TestGrouping`, `TestPrintedOutput` — `unittest` test classes; the
-    last two capture printed output and check provider grouping,
-    menu numbering, and column alignment
+    `TestGrouping`, `TestPrintedOutput`, `TestNestedBlocks`,
+    `TestExpandedFeatures` — `unittest` test classes covering grouping,
+    column alignment with `X` markers, nested-block explanations, and
+    the new provider/function/ephemeral/nested-type features
   - `run_self_tests()` — runs every test class and returns an exit code
 
 Data flows through the program in one direction:
@@ -385,11 +543,13 @@ Terraform JSON (or demo / file)
 python3 tfp.py --self-test
 ```
 
-This runs 27 tests covering type formatting, collecting items from a
+This runs 42 tests covering type formatting, collecting items from a
 schema, keyword and exact search, required / optional / attributes
-filtering (including nested blocks), provider grouping, menu
-numbering, and column layout. The tests use fake schemas, so they pass
-on any machine, with or without Terraform installed.
+filtering, provider grouping, menu numbering, `X`-marker column
+alignment, nested-block explanations, provider configuration, nested
+attributes, provider-defined functions and ephemeral resources. The
+tests use fake schemas, so they pass on any machine, with or without
+Terraform installed.
 
 ## Troubleshooting
 
