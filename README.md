@@ -16,13 +16,6 @@ you can:
    - `optional` — only arguments you **may** set
    - `attributes` — only values Terraform gives back to you (computed)
 
-The script is designed to be clear and readable:
-
-- Only Python's standard library is used, so there is nothing to install.
-- Extensive comments are provided throughout the code.
-- Each function does one small, clear job.
-- Tests live at the end of the file and can be run with `--self-test`.
-
 ## Design choices
 
 This first version uses the following approach (option **A** for each
@@ -78,30 +71,6 @@ python3 tfp.py --demo show cidr_contains --kind function
 python3 tfp.py --demo list --kind ephemerals
 ```
 
-Notes on these examples:
-
-- `search fake --show required` lists the matches first, then asks you to
-  type a number to view one of them. Type `q` to quit without viewing.
-- In `show fake_server --show required`, you can see both the required
-  top-level argument (`name`) and the required nested block
-  (`disk { gb }`). The `optional` and `attributes` views filter that
-  nested block out, which is the correct behaviour.
-
-Verified behaviour:
-
-- All 42 built-in tests pass.
-- Results are grouped by provider: each provider name is printed once,
-  as a heading at the top of its section, instead of being repeated on
-  every row. A new heading only appears when the output moves to a
-  different provider.
-- Arguments and attributes are shown in aligned columns (see
-  “Output format” below).
-- `required` correctly shows `name` plus the required nested
-  `disk { gb }` block, while `optional` / `attributes` filter it out.
-- Without `--demo`, on a machine with no Terraform installed, the script
-  stops with a friendly error message explaining the problem and
-  suggesting `--demo` or `--self-test`, instead of printing a traceback.
-
 ## Output format
 
 `list` and `search` print one section per provider, with the items in
@@ -121,15 +90,6 @@ NUMBER  KIND        NAME
 
 Total: 4
 ```
-
-The numbering keeps counting across providers, and typing a number
-after a search always selects the item printed beside that number.
-
-`show` prints the provider once at the top, then one table per block.
-Flag columns use short headings and an `X` marker (blank means no).
-A value that is optional *and* computed gets an `X` in both `OPT` and
-`COMP`. Column widths grow to the widest entry in the table so short
-and long names stay aligned. Only the description column wraps.
 
 ```text
 Provider: fake
@@ -159,93 +119,6 @@ port    number       X    X           Port number.
 secure  bool         X                Use TLS.
 ```
 
-Nested blocks and nested attributes keep their own indented tables with
-the same columns, so the nesting stays visible.
-
-## How nested blocks are presented
-
-A nested block is configuration written as `name { ... }` instead of
-`name = value`. Providers describe these in their schema with raw
-cardinality data such as `set, min: 0`. The script translates that into
-plain language and groups blocks by purpose:
-
-- **Nested configuration blocks** — ordinary provider-defined blocks.
-- **Lookup filter blocks** — a data-source `filter` block.
-- **Provider operation timeouts** — a `timeouts` block.
-
-Each block shows whether it is optional or required, whether it may be
-repeated, what it is for, and — for `filter` and `timeouts` — a small
-HCL example. If a block is optional, its fields are headed
-“Fields — required only if you write this block:”, because a field
-marked `required` there is only required once you choose to use that
-block.
-
-For example, `aws_security_group` used as a data source has both of
-these special blocks. Neither is a property of the security group
-itself:
-
-- `filter` narrows the lookup for an existing security group, using
-  AWS filter names such as `tag:Name` or `vpc-id`. It does not change
-  the security group.
-- `timeouts` controls how long Terraform waits for the read operation.
-  Most users never need to set it.
-
-```hcl
-data "aws_security_group" "example" {
-  filter {
-    name   = "tag:Name"
-    values = ["web-server"]
-  }
-
-  timeouts {
-    read = "5m"
-  }
-}
-```
-
-In the output, those blocks look like this (abbreviated):
-
-```text
-Lookup filter blocks:
----------------------
-  filter
-  Optional block; may be repeated. Each block must be unique.
-  Purpose:
-    Narrows the data-source lookup using provider filter names, such as
-    "tag:Name" or "vpc-id". This does not change the object itself.
-  Written as:
-    filter {
-      name   = "tag:Name"
-      values = ["example"]
-    }
-  Fields — required only if you write this block:
-    NAME    TYPE           REQ  OPT  COMP  SENS  DESCRIPTION
-    ------  -------------  ---  ---  ----  ----  -----------
-    name    string         X
-    values  set of string  X
-
-Provider operation timeouts:
-----------------------------
-  timeouts
-  Optional block; may appear at most once.
-  Purpose:
-    Controls how long Terraform waits for provider operations. Field values are
-    durations, such as "5m". This is not a property of the object itself, and
-    most users do not need to set it.
-  Written as:
-    timeouts {
-      read = "5m"
-    }
-  Fields — required only if you write this block:
-    NAME  TYPE    REQ  OPT  COMP  SENS  DESCRIPTION
-    ----  ------  ---  ---  ----  ----  -----------
-    read  string       X
-```
-
-For a data source, the top-level table is also introduced as
-“Lookup arguments and returned attributes”, with a note that
-`optional` values can be used to find the object and `computed` values
-are returned from the object that was found.
 
 ## Provider configuration, functions and ephemerals
 
@@ -256,23 +129,6 @@ View a provider’s own configuration (the arguments inside
 python3 tfp.py --demo provider fake
 python3 tfp.py provider aws --show required
 ```
-
-```text
-Provider: fake
-
-Provider configuration  [provider]
-==================================
-Showing: all
-
-Configuration arguments:
-Markers: X = yes  (REQ = required, OPT = optional, COMP = computed, SENS = sensitive)
-NAME                 TYPE            REQ  OPT  COMP  SENS  DESCRIPTION
--------------------  --------------  ---  ---  ----  ----  -----------------------------
-access_key           string               X          X     Static access key.
-region               string               X                AWS region to use.
-shared_config_files  list of string       X                Paths to shared config files.
-```
-
 List and show provider-defined functions and ephemeral resources:
 
 ```bash
@@ -281,14 +137,6 @@ python3 tfp.py --demo show cidr_contains --kind function
 python3 tfp.py --demo list --kind ephemerals
 python3 tfp.py --demo show temporary_password --kind ephemeral
 ```
-
-Ephemeral resources print a note that their values exist only during the
-Terraform operation and are not saved in state or plan files.
-
-`nested_type` attributes (provider-framework nested objects) are expanded
-under their parent with the same columns, for example
-`Nested attributes under "endpoint" (object):`. That is separate from
-`block_types`, which are nested HCL blocks written as `name { ... }`.
 
 ## Running it from any Terraform folder
 
@@ -301,33 +149,12 @@ as a subprocess, and subprocesses inherit your current working
 directory. So Terraform runs wherever you happen to be standing, while
 the script itself lives elsewhere.
 
-### Easiest: call it by its full path
-
-```bash
-cd ~/some/terraform/project
-terraform init
-python3 /home/jdr/jdrgithub/tfp/tfp.py list
-python3 /home/jdr/jdrgithub/tfp/tfp.py search ec2
-python3 /home/jdr/jdrgithub/tfp/tfp.py show aws_instance --show required
-```
-
-That works from any folder. The full path is just tedious to type.
-
-> If you move this repository, replace
-> `/home/jdr/jdrgithub/tfp/tfp.py` in the commands below
-> with the script's new location.
-
-### Recommended: one symlink so you can type `tfview` anywhere
-
-A symlink is a pointer, not a copy — edits to the script in this repo
-are instantly live everywhere:
 
 ```bash
 chmod +x /home/jdr/jdrgithub/tfp/tfp.py
 mkdir -p ~/.local/bin
 ln -s /home/jdr/jdrgithub/tfp/tfp.py ~/.local/bin/tfview
 ```
-
 Then from any Terraform folder:
 
 ```bash
@@ -338,14 +165,6 @@ tfview search bucket --show optional
 tfview show aws_instance --show attributes
 ```
 
-If `tfview` is not found, `~/.local/bin` may not be on your `PATH` yet.
-Add it once (this system uses `zsh`):
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
 ### Alternative: a shell alias
 
 Same result, different mechanism — pick one, not both:
@@ -354,20 +173,6 @@ Same result, different mechanism — pick one, not both:
 echo "alias tfview='python3 /home/jdr/jdrgithub/tfp/tfp.py'" >> ~/.zshrc
 source ~/.zshrc
 ```
-
-The symlink is slightly preferable: it works in scripts and other
-shells, not just interactive `zsh`.
-
-### Things worth knowing
-
-- `terraform init` is still per-folder (it downloads providers into
-  that project) — that is Terraform's own behaviour, unrelated to this
-  script. The script itself is never installed per folder.
-- Relative paths still behave as you would expect:
-  `tfview --schema-file schema.json list` looks for `schema.json` in
-  your current folder, not next to the script.
-- `--demo` and `--self-test` work from anywhere too:
-  `tfview --self-test`.
 
 ## Use it for real
 
@@ -432,14 +237,6 @@ Note: global options such as `--demo`, `--schema-file`, and
   only during a Terraform operation and are not saved in state or plan files.
 - **Provider-defined function:** a function supplied by the provider and
   callable from Terraform expressions.
-
-### One nuance worth knowing
-
-A value can be both **optional** and **computed** at the same time: you
-may set it, and Terraform may also fill it in for you. Such a value (for
-example `tags` in the demo data) legitimately appears in both the
-`optional` view and the `attributes` view — with an `X` under both
-`OPT` and `COMP`. That is real provider behaviour, not a bug.
 
 ## How the code is organized
 
@@ -551,110 +348,9 @@ attributes, provider-defined functions and ephemeral resources. The
 tests use fake schemas, so they pass on any machine, with or without
 Terraform installed.
 
-## Troubleshooting
-
-- **“Could not find the 'terraform' program”** — Terraform is not
-  installed, or not on your `PATH`. Install Terraform, or practise with
-  `--demo` / `--self-test`.
-- **“Terraform could not produce a schema”** — run the script inside a
-  Terraform project folder and make sure you have run `terraform init`
-  there first.
-- **“No resources or data sources were found”** — the provider may not be
-  used by the code in the current folder yet. Add a resource or data
-  source from that provider to your `.tf` files, run `terraform init`,
-  and try again.
-
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `tfp.py` | The script itself, including demo data and tests |
 | `README.md` | This document |
-
-## Addendum: Running in WSL
-
-Yes — this script runs from WSL (Windows Subsystem for Linux), provided
-Python and Terraform are installed **inside your WSL distribution**.
-
-Nothing in `tfp.py` is specific to native Linux versus
-WSL:
-
-- It uses only Python's standard library.
-- It specifies the standard Linux interpreter
-  (`#!/usr/bin/env python3`).
-- It launches Terraform as a program named `terraform` in the current
-  folder (`terraform providers schema -json`), just as it does on Linux.
-
-### Requirements inside WSL
-
-Check these from your WSL terminal:
-
-```bash
-python3 --version
-terraform --version
-```
-
-You need:
-
-- **Python 3.10 or newer**
-- The **Linux version of Terraform**, installed inside WSL and
-  available on its `PATH`
-
-Do not rely on a Terraform installation located only in Windows. WSL
-can sometimes invoke Windows executables through interoperability, but
-a native Linux Terraform binary is the reliable and predictable setup.
-
-### Recommended WSL layout
-
-Keep both the script and your Terraform projects in the WSL
-filesystem, for example:
-
-```text
-/home/<you>/jdrgithub/tfp/tfp.py
-/home/<you>/terraform/project/
-```
-
-Then:
-
-```bash
-cd ~/terraform/project
-terraform init
-tfview list
-tfview search ec2
-```
-
-Keeping projects under `/home/...` is usually faster and avoids
-permissions, executable-bit, and symbolic-link quirks that can occur on
-Windows-mounted paths such as `/mnt/c/...`.
-
-A script or Terraform project under `/mnt/c/...` will often still work,
-particularly if you invoke it with `python3 ...` directly. However,
-Linux Terraform and a native WSL home directory are the safer
-combination.
-
-### Symlink setup in WSL
-
-The symlink setup described in “Running it from any Terraform folder”
-also applies; substitute your actual WSL path:
-
-```bash
-chmod +x ~/jdrgithub/tfp/tfp.py
-mkdir -p ~/.local/bin
-ln -s ~/jdrgithub/tfp/tfp.py ~/.local/bin/tfview
-```
-
-If your WSL shell is Bash rather than Zsh, use `~/.bashrc` rather than
-`~/.zshrc` when adding `~/.local/bin` to your `PATH`.
-
-Also ensure the script retains Unix `LF` line endings if it is edited
-from Windows. Windows `CRLF` endings can break execution of the
-`#!/usr/bin/env python3` line, although running it explicitly with
-`python3 tfp.py ...` generally avoids that particular
-issue.
-
-Even without Terraform installed in WSL, these work immediately:
-
-```bash
-tfview --self-test
-tfview --demo list
-```
