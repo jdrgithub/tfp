@@ -58,12 +58,13 @@ schema JSON (Terraform / file / --demo)
 
 - `search_items()` / `find_exact_items()` — name lookup
 - `filter_attributes()` — `--show all|required|optional|attributes`
+- `partition_arguments_and_attributes()` — split args vs returned for `--show all`
 - `group_items_by_provider()` — section headings and list order
 
 **Print**
 
 - `print_items_list()` — numbered list by provider
-- `print_attribute_table()` — NAME / TYPE / REQ / OPT / COMP / SENS / DESCRIPTION
+- `print_attribute_table()` — NAME / TYPE / REQ / OPT / SENS / DESCRIPTION (Fields: NAME / TYPE / REQ / OPT)
 - `print_block()` / `print_one_block_type()` — nested blocks (config, filter, timeouts)
 - `print_nested_attributes()` — `nested_type` fields under a parent
 - `print_item_details()` / `print_function_details()` — one item or function

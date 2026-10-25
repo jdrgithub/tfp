@@ -114,17 +114,20 @@ from pathlib import Path  # A clean, modern way to work with file paths.
 # ---------------------------------------------------------------------------
 # By convention, constant names are written in ALL_CAPS.
 
-# Column headings for the attribute table, in display order.
+# Column headings for top-level argument / returned-attribute tables.
 # Flag columns use a short heading and an "X" marker (see FLAG_MARKER).
-ATTRIBUTE_HEADERS = ("NAME", "TYPE", "REQ", "OPT", "COMP", "SENS", "DESCRIPTION")
+ATTRIBUTE_HEADERS = ("NAME", "TYPE", "REQ", "OPT", "SENS", "DESCRIPTION")
+
+# Slimmer headings for nested block Fields tables (no SENS / DESCRIPTION).
+FIELDS_HEADERS = ("NAME", "TYPE", "REQ", "OPT")
 
 # Shown in a flag column when the attribute has that property; blank otherwise.
 FLAG_MARKER = "X"
 
-# Legend printed above every attribute table, explaining the short headings.
+# Legend printed once per show, above the first top-level attribute table.
 FLAG_LEGEND = (
     "Markers: X = yes  "
-    "(REQ = required, OPT = optional, COMP = computed, SENS = sensitive)"
+    "(REQ = required, OPT = optional, SENS = sensitive)"
 )
 
 # Only DESCRIPTION is capped and wrapped.  NAME and TYPE grow to fit the
@@ -668,6 +671,37 @@ def is_sensitive(attribute: dict) -> bool:
     return bool(attribute.get("sensitive", False))
 
 
+def is_argument(attribute: dict) -> bool:
+    """Return True if the user may or must set this value in configuration."""
+    return is_required(attribute) or is_optional(attribute)
+
+
+def is_returned_attribute(attribute: dict) -> bool:
+    """Return True if Terraform / the provider fills this value in."""
+    return is_computed(attribute)
+
+
+def partition_arguments_and_attributes(
+    attributes: dict,
+) -> tuple[dict, dict]:
+    """
+    Split attributes into configuration arguments and returned attributes.
+
+    A field that is both optional and computed appears in both dictionaries.
+    """
+    arguments = {
+        name: attribute
+        for name, attribute in attributes.items()
+        if is_argument(attribute)
+    }
+    returned = {
+        name: attribute
+        for name, attribute in attributes.items()
+        if is_returned_attribute(attribute)
+    }
+    return arguments, returned
+
+
 def attribute_matches_show(attribute: dict, show: str) -> bool:
     """
     Decide whether one attribute should be printed for a ``show`` choice.
@@ -715,10 +749,12 @@ def format_type(type_value: object) -> str:
 
     * Simple:  "string", "number", "bool"
     * Nested:  ["list", "string"]            -> "list of string"
-               ["object", {"id": "string"}]  -> "object({id = string})"
+               ["object", {"id": "string"}]  -> "object"
+               ["list", ["object", {...}]]   -> "list of objects"
 
-    This function calls ITSELF for the inner part.  A function that
-    calls itself like this is called "recursive".
+    Object field lists stay out of the TYPE column; nested_type tables
+    cover field detail when the schema provides them.  This function
+    calls ITSELF for non-object inner parts (recursion).
     """
     # Shape 1: a plain string is already readable.
     if isinstance(type_value, str):
@@ -734,15 +770,20 @@ def format_type(type_value: object) -> str:
 
         inner_value = type_value[1]
 
-        # An object lists named fields, e.g. {"id": "string", "on": "bool"}.
+        # Keep object schemas high-level in the TYPE column.
         if outer_type == "object" and isinstance(inner_value, dict):
-            fields = ", ".join(
-                f"{field_name} = {format_type(field_type)}"
-                for field_name, field_type in inner_value.items()
-            )
-            return f"object({{{fields}}})"
+            return "object"
 
-        # list / set / map / tuple all wrap one inner type.
+        # list / set / map / tuple of object -> "list of objects", etc.
+        if (
+            outer_type in {"list", "set", "map", "tuple"}
+            and isinstance(inner_value, list)
+            and inner_value
+            and inner_value[0] == "object"
+        ):
+            return f"{outer_type} of objects"
+
+        # list / set / map / tuple of a simple or other inner type.
         return f"{outer_type} of {format_type(inner_value)}"
 
     # Anything unexpected: fall back to Python's normal text form.
@@ -825,23 +866,35 @@ def format_attribute_type(attribute: dict) -> str:
 
 def build_attribute_row(name: str, attribute: dict) -> tuple[str, ...]:
     """
-    Build one row of the attribute table.
+    Build one row of a top-level attribute table.
 
     The cells follow ATTRIBUTE_HEADERS, in the same order:
-    Name, Type, REQ, OPT, COMP, SENS, Description.
+    Name, Type, REQ, OPT, SENS, Description.
 
     Flag columns contain FLAG_MARKER ("X") when the property is true,
-    and are blank otherwise.  A value that is optional AND computed
-    gets an X in both OPT and COMP.
+    and are blank otherwise.
     """
     return (
         name,
         format_attribute_type(attribute),
         FLAG_MARKER if is_required(attribute) else "",
         FLAG_MARKER if is_optional(attribute) else "",
-        FLAG_MARKER if is_computed(attribute) else "",
         FLAG_MARKER if is_sensitive(attribute) else "",
         build_attribute_description(attribute),
+    )
+
+
+def build_fields_row(name: str, attribute: dict) -> tuple[str, ...]:
+    """
+    Build one row of a nested block Fields table.
+
+    The cells follow FIELDS_HEADERS: Name, Type, REQ, OPT.
+    """
+    return (
+        name,
+        format_attribute_type(attribute),
+        FLAG_MARKER if is_required(attribute) else "",
+        FLAG_MARKER if is_optional(attribute) else "",
     )
 
 
@@ -1151,34 +1204,59 @@ def print_items_list(items: list[ProviderItem], title: str) -> list[ProviderItem
     return displayed_items
 
 
-def print_attribute_table(attributes: dict, indent_level: int = 0) -> None:
+def print_attribute_table(
+    attributes: dict,
+    indent_level: int = 0,
+    *,
+    show_legend: bool = False,
+    fields_table: bool = False,
+) -> None:
     """
     Print attributes as an aligned table.
 
-    Columns: NAME, TYPE, REQ, OPT, COMP, SENS, DESCRIPTION.
-    Flag columns use an X marker.  NAME and TYPE grow to the widest
-    entry in the table so every row lines up; only DESCRIPTION wraps.
+    Top-level columns: NAME, TYPE, REQ, OPT, SENS, DESCRIPTION.
+    Nested Fields columns: NAME, TYPE, REQ, OPT.
+
+    ``show_legend`` prints FLAG_LEGEND above the table (once per show,
+    from the caller).  Flag columns use an X marker.  NAME and TYPE grow
+    to the widest entry; only DESCRIPTION wraps (top-level tables).
     """
     indent = "  " * indent_level
-    print(f"{indent}{FLAG_LEGEND}")
+    if show_legend:
+        print(f"{indent}{FLAG_LEGEND}")
 
-    rows = [
-        build_attribute_row(name, attributes[name])
-        for name in sorted(attributes)
-    ]
-    print_table(
-        ATTRIBUTE_HEADERS,
-        rows,
-        indent=indent,
-        max_widths=(
+    if fields_table:
+        headers = FIELDS_HEADERS
+        rows = [
+            build_fields_row(name, attributes[name])
+            for name in sorted(attributes)
+        ]
+        max_widths = (
+            None,  # NAME
+            None,  # TYPE
+            None,  # REQ
+            None,  # OPT
+        )
+    else:
+        headers = ATTRIBUTE_HEADERS
+        rows = [
+            build_attribute_row(name, attributes[name])
+            for name in sorted(attributes)
+        ]
+        max_widths = (
             None,  # NAME: grow to the widest entry.
             None,  # TYPE: grow to the widest entry.
             None,  # REQ
             None,  # OPT
-            None,  # COMP
             None,  # SENS
             MAX_DESCRIPTION_WIDTH,
-        ),
+        )
+
+    print_table(
+        headers,
+        rows,
+        indent=indent,
+        max_widths=max_widths,
     )
 
 
@@ -1272,24 +1350,23 @@ def print_one_block_type(
         for example_line in example_lines:
             print(f"{inner_indent}  {example_line}")
 
-    # Fields inside the block.  If the block itself is optional, its
-    # "required" fields are only required once you choose to write the
-    # block -- say so, instead of looking unconditional.
-    if is_block_required(block_type):
-        fields_heading = "Fields:"
-    else:
-        fields_heading = "Fields — required only if you write this block:"
-
-    # Print the inside of this block by calling print_block() again,
-    # one level deeper, with our fields heading.
+    # Fields inside the block.  REQ on a nested field already means
+    # required if this block is written; no extra wording needed.
     nested_block = block_type.get("block", {})
     print_block(
         nested_block,
         show,
         indent_level + 2,
         item_kind=item_kind,
-        fields_heading=fields_heading,
+        fields_heading="Fields:",
     )
+
+
+def _arguments_heading(item_kind: str | None) -> str:
+    """Section title for values the user can set."""
+    if item_kind == "datasource":
+        return "Lookup arguments:"
+    return "Configuration arguments:"
 
 
 def print_block(
@@ -1307,8 +1384,7 @@ def print_block(
 
     ``item_kind`` ("resource" / "datasource") lets data-source lookup
     blocks be labelled correctly.  ``fields_heading`` replaces the
-    default attributes heading when a parent block has already
-    explained the context (e.g. "Fields — required only if ...").
+    default attributes heading when printing nested block Fields.
     """
     # Two spaces per level.  " " * 4 means four spaces, and so on.
     indent = "  " * indent_level
@@ -1316,6 +1392,7 @@ def print_block(
     # --- Plain attributes at this level --------------------------------
     all_attributes = block.get("attributes", {})
     visible_attributes = filter_attributes(all_attributes, show)
+    is_top_level = indent_level == 0 and fields_heading is None
 
     if visible_attributes:
         if fields_heading is not None:
@@ -1323,30 +1400,75 @@ def print_block(
             # printed one level above the table itself.
             heading_indent = "  " * max(indent_level - 1, 0)
             print(f"{heading_indent}{fields_heading}")
-        elif item_kind == "provider" and indent_level == 0:
-            print(f"{indent}Configuration arguments:")
-        elif item_kind == "datasource" and indent_level == 0:
-            # Data sources are looked up, then read.  Say which is which.
-            print(f"{indent}Lookup arguments and returned attributes:")
-            print(
-                f"{indent}For a data source, OPTIONAL values can be used "
-                "to find the object."
+            print_attribute_table(
+                visible_attributes,
+                indent_level,
+                fields_table=True,
             )
-            print(
-                f"{indent}COMPUTED values are returned from the object "
-                "that was found."
+            print_nested_attributes(
+                visible_attributes,
+                show,
+                indent_level=indent_level,
+            )
+        elif is_top_level and show == "all":
+            # Split lookup/config arguments from returned attributes.
+            arguments, returned = partition_arguments_and_attributes(
+                visible_attributes
+            )
+            legend_printed = False
+
+            if arguments:
+                print(f"{indent}{_arguments_heading(item_kind)}")
+                print_attribute_table(
+                    arguments,
+                    indent_level,
+                    show_legend=True,
+                )
+                legend_printed = True
+
+            if returned:
+                if arguments:
+                    print()
+                print(f"{indent}Returned attributes:")
+                print_attribute_table(
+                    returned,
+                    indent_level,
+                    show_legend=not legend_printed,
+                )
+
+            # Expand nested_type once, even when a dual field appears
+            # in both sections above.
+            print_nested_attributes(
+                visible_attributes,
+                show,
+                indent_level=indent_level,
+            )
+        elif is_top_level:
+            # Filtered --show: one table with the matching section title.
+            if show == "attributes":
+                heading = "Returned attributes:"
+            else:
+                heading = _arguments_heading(item_kind)
+            print(f"{indent}{heading}")
+            print_attribute_table(
+                visible_attributes,
+                indent_level,
+                show_legend=True,
+            )
+            print_nested_attributes(
+                visible_attributes,
+                show,
+                indent_level=indent_level,
             )
         else:
             print(f"{indent}Arguments / attributes:")
-        # The table sorts the names alphabetically, one attribute per row.
-        print_attribute_table(visible_attributes, indent_level)
-        # Expand any nested_type attributes underneath their parents.
-        print_nested_attributes(
-            visible_attributes,
-            show,
-            indent_level=indent_level,
-        )
-    elif indent_level == 0 and fields_heading is None:
+            print_attribute_table(visible_attributes, indent_level)
+            print_nested_attributes(
+                visible_attributes,
+                show,
+                indent_level=indent_level,
+            )
+    elif is_top_level:
         # Only say this at the top level, so nested output stays quiet.
         print(f"{indent}(no entries match --show {show})")
 
@@ -1397,8 +1519,10 @@ def print_block(
 
 def print_item_metadata(item: ProviderItem) -> None:
     """
-    Print description, schema version and deprecation for one item.
+    Print description and deprecation for one item.
 
+    Schema version is parsed into ``ProviderItem`` but not printed;
+    it is state-migration trivia, not useful when browsing fields.
     Only lines that have a value in the schema are printed, so items
     without metadata stay quiet.
     """
@@ -1408,9 +1532,6 @@ def print_item_metadata(item: ProviderItem) -> None:
             width=80,
         ):
             print(line)
-
-    if item.schema_version is not None:
-        print(f"Schema version: {item.schema_version}")
 
     if item.deprecated:
         if isinstance(item.deprecated, str):
@@ -1446,7 +1567,6 @@ def print_item_details(item: ProviderItem, show: str) -> None:
     print(heading)
     print("=" * len(heading))
     print_item_metadata(item)
-    print(f"Showing: {show}")
     print()
 
     # Pass the kind along so nested blocks can be labelled correctly
@@ -2354,10 +2474,14 @@ class TestFormatType(unittest.TestCase):
         # ["list", "string"] should read as "list of string".
         self.assertEqual(format_type(["list", "string"]), "list of string")
 
-    def test_object_type_lists_its_fields(self):
-        # Objects should spell out each named field and its type.
+    def test_object_type_stays_high_level(self):
+        # Objects stay high-level in the TYPE column (no field expansion).
         result = format_type(["object", {"id": "string", "on": "bool"}])
-        self.assertEqual(result, "object({id = string, on = bool})")
+        self.assertEqual(result, "object")
+        self.assertEqual(
+            format_type(["list", ["object", {"id": "string"}]]),
+            "list of objects",
+        )
 
 
 class TestCollectAndSearch(unittest.TestCase):
@@ -2552,15 +2676,15 @@ class TestPrintedOutput(unittest.TestCase):
         _result, output = capture_output(print_item_details, server, "all")
         lines = output.splitlines()
 
-        # Find the (first) column heading line and note where each
+        # Find the first top-level column heading and note where each
         # flag column starts.  Flag columns use short headings and X.
         header = next(line for line in lines if line.startswith("NAME"))
         req_at = header.index("REQ")
         opt_at = header.index("OPT")
-        comp_at = header.index("COMP")
         sens_at = header.index("SENS")
         self.assertIn("DESCRIPTION", header)
-        self.assertIn(FLAG_LEGEND, output)
+        self.assertNotIn("COMP", header)
+        self.assertEqual(output.count(FLAG_LEGEND), 1)
 
         def row_starting_with(name: str) -> str:
             return next(
@@ -2571,21 +2695,67 @@ class TestPrintedOutput(unittest.TestCase):
         name_row = row_starting_with("name")
         self.assertEqual(name_row[req_at], FLAG_MARKER)
 
-        # "tags" is optional AND computed: an X in both OPT and COMP.
+        # "tags" is optional (and also returned): X under OPT in args.
         tags_row = row_starting_with("tags")
         self.assertEqual(tags_row[opt_at], FLAG_MARKER)
-        self.assertEqual(tags_row[comp_at], FLAG_MARKER)
-
-        id_row = row_starting_with("id")
-        self.assertEqual(id_row[comp_at], FLAG_MARKER)
 
         # Whole words must not appear as flag cells.
         self.assertNotIn(" required", name_row)
         self.assertNotIn(" optional", tags_row)
-        self.assertNotIn(" computed", id_row)
 
         # SENS is present on the heading even when empty for these rows.
         self.assertEqual(len(name_row) > sens_at, True)
+
+    def test_show_all_splits_arguments_and_returned_attributes(self):
+        items = collect_items(make_fake_schema())
+        server = find_exact_items(items, "fake_server")[0]
+        _result, output = capture_output(print_item_details, server, "all")
+
+        self.assertIn("Configuration arguments:", output)
+        self.assertIn("Returned attributes:", output)
+        self.assertNotIn("OPTIONAL values can be used", output)
+        self.assertNotIn("COMPUTED values are returned", output)
+        self.assertNotIn("Arguments / attributes:", output)
+        self.assertNotIn("Showing:", output)
+        self.assertNotIn("Schema version:", output)
+
+        args_at = output.index("Configuration arguments:")
+        returned_at = output.index("Returned attributes:")
+        self.assertLess(args_at, returned_at)
+
+        # Dual field appears under both sections; returned-only under
+        # Returned only; required-only under Configuration only.
+        args_section = output[args_at:returned_at]
+        returned_section = output[returned_at:]
+        self.assertIn("tags", args_section)
+        self.assertIn("tags", returned_section)
+        args_id_rows = [
+            line for line in args_section.splitlines() if line.startswith("id ")
+        ]
+        returned_id_rows = [
+            line
+            for line in returned_section.splitlines()
+            if line.startswith("id ")
+        ]
+        self.assertEqual(args_id_rows, [])
+        self.assertEqual(len(returned_id_rows), 1)
+        self.assertTrue(
+            any(line.startswith("name ") for line in args_section.splitlines())
+        )
+        self.assertFalse(
+            any(
+                line.startswith("name ")
+                for line in returned_section.splitlines()
+            )
+        )
+
+    def test_datasource_show_all_uses_lookup_heading(self):
+        items = collect_items(make_fake_schema())
+        image = find_exact_items(items, "fake_image")[0]
+        _result, output = capture_output(print_item_details, image, "all")
+        self.assertIn("Lookup arguments:", output)
+        self.assertIn("Returned attributes:", output)
+        self.assertNotIn("Lookup arguments and returned attributes:", output)
 
     def test_long_description_wraps_inside_the_description_column(self):
         long_description = (
@@ -2719,8 +2889,23 @@ class TestNestedBlocks(unittest.TestCase):
         self.assertIn("Optional block; may be repeated. Each block must be unique.", output)
         self.assertIn("Optional block; may appear at most once.", output)
         self.assertIn("Narrows the data-source lookup", output)
-        self.assertIn("Fields — required only if you write this block:", output)
+        self.assertIn("Fields:", output)
+        self.assertNotIn("required only if you write this block", output)
         self.assertIn("Written as:", output)
+
+        # Fields tables are slim: no SENS / DESCRIPTION, no second legend.
+        fields_at = output.index("Fields:")
+        fields_chunk = output[fields_at:fields_at + 400]
+        fields_header = next(
+            line
+            for line in fields_chunk.splitlines()
+            if "NAME" in line and "TYPE" in line
+        )
+        self.assertIn("REQ", fields_header)
+        self.assertIn("OPT", fields_header)
+        self.assertNotIn("SENS", fields_header)
+        self.assertNotIn("DESCRIPTION", fields_header)
+        self.assertEqual(output.count(FLAG_LEGEND), 1)
         self.assertIn('name   = "tag:Name"', output)
         self.assertIn('read = "5m"', output)
         self.assertNotIn("block (set", output)
@@ -2804,7 +2989,7 @@ class TestExpandedFeatures(unittest.TestCase):
 
         _result, output = capture_output(print_item_details, bucket, "all")
         self.assertIn("Description: A simple storage bucket.", output)
-        self.assertIn("Schema version: 1", output)
+        self.assertNotIn("Schema version:", output)
         self.assertIn("Deprecated: Use fake_object_store instead.", output)
 
     def test_nested_type_attributes_are_expanded(self):
