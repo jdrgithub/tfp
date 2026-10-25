@@ -234,7 +234,8 @@ class FunctionItem:
     Everything we need to know about ONE provider-defined function.
 
     Provider functions are callable from Terraform expressions and are
-    described under ``function_schemas`` in the provider JSON.
+    described under ``functions`` in the provider JSON (Terraform's
+    schema export; older fixtures may use ``function_schemas``).
     """
 
     name: str
@@ -503,17 +504,23 @@ def collect_functions(schema: dict) -> list[FunctionItem]:
     """
     Collect every provider-defined function from the schema.
 
-    Missing ``function_schemas`` sections are treated as empty, so
-    older Terraform / provider versions keep working unchanged.
+    Real ``terraform providers schema -json`` output uses ``functions``.
+    Missing that map (and the older ``function_schemas`` alias) is
+    treated as empty so older Terraform / providers keep working.
     """
     functions: list[FunctionItem] = []
     provider_schemas = schema.get("provider_schemas", {})
 
     for provider_address, provider_data in provider_schemas.items():
         provider_name = get_short_provider_name(provider_address)
-        function_schemas = provider_data.get("function_schemas", {})
+        # Prefer the documented key; fall back for older saved JSON / demos.
+        function_map = provider_data.get("functions")
+        if not isinstance(function_map, dict):
+            function_map = provider_data.get("function_schemas", {})
+        if not isinstance(function_map, dict):
+            function_map = {}
 
-        for name, function_data in function_schemas.items():
+        for name, function_data in function_map.items():
             parameters = [
                 parse_function_parameter(param.get("name", f"arg{index}"), param)
                 for index, param in enumerate(function_data.get("parameters", []))
@@ -531,7 +538,10 @@ def collect_functions(schema: dict) -> list[FunctionItem]:
             description = " ".join(
                 str(function_data.get("description", "")).split()
             )
-            deprecated = function_data.get("deprecated")
+            # Docs use deprecation_message; some fixtures use deprecated.
+            deprecated = function_data.get("deprecation_message")
+            if deprecated is None:
+                deprecated = function_data.get("deprecated")
             if isinstance(deprecated, str):
                 deprecated = " ".join(deprecated.split()) or None
 
@@ -2402,7 +2412,7 @@ def make_fake_schema() -> dict:
                         },
                     }
                 },
-                "function_schemas": {
+                "functions": {
                     "cidr_contains": {
                         "summary": "Checks whether an address belongs to a network.",
                         "description": (
@@ -3011,6 +3021,28 @@ class TestExpandedFeatures(unittest.TestCase):
         self.assertIn("Parameters:", output)
         self.assertIn("network", output)
         self.assertIn("address", output)
+
+    def test_collect_functions_accepts_legacy_key_and_deprecation_message(self):
+        # Older fixtures used function_schemas; real TF uses functions +
+        # deprecation_message.
+        schema = {
+            "provider_schemas": {
+                "registry.terraform.io/hashicorp/legacy": {
+                    "function_schemas": {
+                        "old_fn": {
+                            "summary": "legacy",
+                            "return_type": "string",
+                            "parameters": [],
+                            "deprecation_message": "Use new_fn instead.",
+                        }
+                    }
+                }
+            }
+        }
+        collected = collect_functions(schema)
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(collected[0].name, "old_fn")
+        self.assertEqual(collected[0].deprecated, "Use new_fn instead.")
 
     def test_ephemeral_resources_are_listed_and_noted(self):
         ephemerals = [item for item in self.items if item.kind == "ephemeral"]

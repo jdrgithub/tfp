@@ -52,7 +52,7 @@ schema JSON (Terraform / file / --demo)
 
 - `collect_items()` — resources, data sources, ephemerals
 - `collect_provider_configs()` — `provider "NAME" { ... }` schemas
-- `collect_functions()` — provider-defined functions
+- `collect_functions()` — provider-defined functions (`functions` key; `function_schemas` fallback)
 
 **Filter**
 
