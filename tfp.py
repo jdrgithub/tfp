@@ -116,9 +116,9 @@ from pathlib import Path  # A clean, modern way to work with file paths.
 
 # Column headings for top-level argument / returned-attribute tables.
 # Flag columns use a short heading and an "X" marker (see FLAG_MARKER).
-ATTRIBUTE_HEADERS = ("NAME", "TYPE", "REQ", "OPT", "SENS", "DESCRIPTION")
+ATTRIBUTE_HEADERS = ("NAME", "TYPE", "REQ", "OPT", "SENS")
 
-# Slimmer headings for nested block Fields tables (no SENS / DESCRIPTION).
+# Slimmer headings for nested block Fields tables (no SENS).
 FIELDS_HEADERS = ("NAME", "TYPE", "REQ", "OPT")
 
 # Shown in a flag column when the attribute has that property; blank otherwise.
@@ -130,8 +130,8 @@ FLAG_LEGEND = (
     "(REQ = required, OPT = optional, SENS = sensitive)"
 )
 
-# Only DESCRIPTION is capped and wrapped.  NAME and TYPE grow to fit the
-# widest entry in the table so every row lines up.
+# Function-parameter DESCRIPTION column is capped and wrapped.  Attribute
+# table NAME and TYPE grow to the widest entry so every row lines up.
 MAX_DESCRIPTION_WIDTH = 46
 
 # Plain-language explanations for block names whose raw provider schema
@@ -790,31 +790,6 @@ def format_type(type_value: object) -> str:
     return str(type_value)
 
 
-def build_attribute_description(attribute: dict) -> str:
-    """
-    Build the text for the DESCRIPTION column of one attribute.
-
-    Sensitive is shown in the SENS column as an X, so it is not repeated
-    here.  Deprecated notes stay in the description.
-    """
-    notes: list[str] = []
-
-    # Collapse runs of whitespace (including newlines) into single
-    # spaces, so the description fits neatly on wrapped table lines.
-    description = " ".join(str(attribute.get("description", "")).split())
-    if description:
-        notes.append(description)
-
-    deprecated = attribute.get("deprecated")
-    if isinstance(deprecated, str) and deprecated:
-        notes.append(f"Deprecated: {' '.join(deprecated.split())}")
-    elif deprecated:
-        # Sometimes the value is simply True instead of a message.
-        notes.append("Deprecated.")
-
-    return " ".join(notes)
-
-
 def get_nested_type(attribute: dict) -> dict | None:
     """
     Return the nested_type dictionary for an attribute, or None.
@@ -869,7 +844,7 @@ def build_attribute_row(name: str, attribute: dict) -> tuple[str, ...]:
     Build one row of a top-level attribute table.
 
     The cells follow ATTRIBUTE_HEADERS, in the same order:
-    Name, Type, REQ, OPT, SENS, Description.
+    Name, Type, REQ, OPT, SENS.
 
     Flag columns contain FLAG_MARKER ("X") when the property is true,
     and are blank otherwise.
@@ -880,7 +855,6 @@ def build_attribute_row(name: str, attribute: dict) -> tuple[str, ...]:
         FLAG_MARKER if is_required(attribute) else "",
         FLAG_MARKER if is_optional(attribute) else "",
         FLAG_MARKER if is_sensitive(attribute) else "",
-        build_attribute_description(attribute),
     )
 
 
@@ -1214,12 +1188,12 @@ def print_attribute_table(
     """
     Print attributes as an aligned table.
 
-    Top-level columns: NAME, TYPE, REQ, OPT, SENS, DESCRIPTION.
+    Top-level columns: NAME, TYPE, REQ, OPT, SENS.
     Nested Fields columns: NAME, TYPE, REQ, OPT.
 
     ``show_legend`` prints FLAG_LEGEND above the table (once per show,
     from the caller).  Flag columns use an X marker.  NAME and TYPE grow
-    to the widest entry; only DESCRIPTION wraps (top-level tables).
+    to the widest entry in the table.
     """
     indent = "  " * indent_level
     if show_legend:
@@ -1249,7 +1223,6 @@ def print_attribute_table(
             None,  # REQ
             None,  # OPT
             None,  # SENS
-            MAX_DESCRIPTION_WIDTH,
         )
 
     print_table(
@@ -2681,8 +2654,8 @@ class TestPrintedOutput(unittest.TestCase):
         header = next(line for line in lines if line.startswith("NAME"))
         req_at = header.index("REQ")
         opt_at = header.index("OPT")
-        sens_at = header.index("SENS")
-        self.assertIn("DESCRIPTION", header)
+        self.assertIn("SENS", header)
+        self.assertNotIn("DESCRIPTION", header)
         self.assertNotIn("COMP", header)
         self.assertEqual(output.count(FLAG_LEGEND), 1)
 
@@ -2702,9 +2675,6 @@ class TestPrintedOutput(unittest.TestCase):
         # Whole words must not appear as flag cells.
         self.assertNotIn(" required", name_row)
         self.assertNotIn(" optional", tags_row)
-
-        # SENS is present on the heading even when empty for these rows.
-        self.assertEqual(len(name_row) > sens_at, True)
 
     def test_show_all_splits_arguments_and_returned_attributes(self):
         items = collect_items(make_fake_schema())
@@ -2756,42 +2726,6 @@ class TestPrintedOutput(unittest.TestCase):
         self.assertIn("Lookup arguments:", output)
         self.assertIn("Returned attributes:", output)
         self.assertNotIn("Lookup arguments and returned attributes:", output)
-
-    def test_long_description_wraps_inside_the_description_column(self):
-        long_description = (
-            "This is a deliberately long description that cannot fit "
-            "inside one description column, so it must wrap neatly."
-        )
-        item = ProviderItem(
-            name="long_server",
-            kind="resource",
-            provider="fake",
-            block={
-                "attributes": {
-                    "setting": {
-                        "type": "string",
-                        "optional": True,
-                        "description": long_description,
-                    }
-                }
-            },
-        )
-        _result, output = capture_output(print_item_details, item, "all")
-        lines = output.splitlines()
-        header = next(line for line in lines if line.startswith("NAME"))
-        description_at = header.index("DESCRIPTION")
-
-        # The first row line carries the start of the description...
-        row_index = next(
-            index for index, line in enumerate(lines) if line.startswith("setting ")
-        )
-        self.assertIn("deliberately", lines[row_index])
-
-        # ...and a continuation line follows, with text only in the
-        # description column (everything before it is blank).
-        continuation = lines[row_index + 1]
-        self.assertTrue(continuation[description_at:].strip())
-        self.assertEqual(continuation[:description_at].strip(), "")
 
     def test_nested_block_attributes_use_an_indented_table(self):
         items = collect_items(make_fake_schema())
@@ -2966,20 +2900,18 @@ class TestExpandedFeatures(unittest.TestCase):
         header = next(line for line in lines if line.startswith("NAME"))
         type_at = header.index("TYPE")
         opt_at = header.index("OPT")
-        desc_at = header.index("DESCRIPTION")
+        self.assertNotIn("DESCRIPTION", header)
 
         region = next(line for line in lines if line.startswith("region "))
         shared = next(
             line for line in lines if line.startswith("shared_config_files ")
         )
 
-        # TYPE, OPT and DESCRIPTION start at identical positions.
+        # TYPE and OPT start at identical positions across rows.
         self.assertEqual(region.index("string"), type_at)
         self.assertEqual(shared.index("list of string"), type_at)
         self.assertEqual(region[opt_at], FLAG_MARKER)
         self.assertEqual(shared[opt_at], FLAG_MARKER)
-        self.assertTrue(region[desc_at:].startswith("AWS region"))
-        self.assertTrue(shared[desc_at:].startswith("Paths to shared"))
 
     def test_item_metadata_is_printed_when_present(self):
         bucket = find_exact_items(self.items, "fake_bucket")[0]
