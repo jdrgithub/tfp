@@ -905,41 +905,25 @@ def is_block_required(block_type: dict) -> bool:
     return block_type.get("min_items", 0) >= 1
 
 
-def describe_block_cardinality(block_type: dict) -> str:
+def format_block_cardinality_lines(block_type: dict) -> list[str]:
     """
-    Translate raw schema cardinality into a plain-language sentence.
+    Translate schema cardinality into two short yes/no lines.
 
-    The schema encodes how many of a block may appear as a nesting
-    mode (single / list / set) plus ``min_items`` and ``max_items``.
-    That is precise but unfriendly, e.g. "set, min: 0".  This turns it
-    into wording such as "Optional block; may be repeated. Each block
-    must be unique."
+    Returns:
+        ["Optional: yes|no", "Repeated: yes|no"]
+
+    Repeated is no when the block may appear at most once (single nesting
+    or max_items == 1); otherwise yes.  Set uniqueness is implied by
+    Repeated and is not mentioned.
     """
     nesting_mode = block_type.get("nesting_mode", "single")
-    min_items = block_type.get("min_items", 0)
     max_items = block_type.get("max_items")
-
-    # A "set" cannot contain the same block twice.
-    uniqueness = " Each block must be unique." if nesting_mode == "set" else ""
-
-    if is_block_required(block_type):
-        if max_items == 1:
-            return "Required block; exactly one must be provided."
-        if max_items is not None:
-            return (
-                f"Required block; at least {min_items} must be provided, "
-                f"and no more than {max_items}."
-            )
-        if nesting_mode == "single":
-            return "Required block; exactly one must be provided."
-        return f"Required block; at least {min_items} must be provided."
-
-    # From here on, the block itself is optional (min_items is 0).
+    optional = "no" if is_block_required(block_type) else "yes"
     if nesting_mode == "single" or max_items == 1:
-        return "Optional block; may appear at most once."
-    if max_items is not None:
-        return f"Optional block; may be repeated up to {max_items} times.{uniqueness}"
-    return f"Optional block; may be repeated.{uniqueness}"
+        repeated = "no"
+    else:
+        repeated = "yes"
+    return [f"Optional: {optional}", f"Repeated: {repeated}"]
 
 
 def classify_block(name: str, item_kind: str | None) -> str:
@@ -1320,20 +1304,22 @@ def print_one_block_type(
     show: str,
     indent_level: int,
     item_kind: str | None,
+    *,
+    show_nested: bool = False,
+    show_filters: bool = False,
 ) -> None:
     """
     Print ONE nested block: heading, explanation, example, and fields.
 
-    The heading uses plain language (what the block is for, and whether
-    it is optional / required / repeatable) instead of raw schema
+    The heading uses Name / Optional / Repeated instead of raw schema
     wording like "block (set, min: 0)".
     """
     indent = "  " * indent_level
     inner_indent = indent + "  "
 
-    # Block name, then how many of it may appear.
-    print(f"{inner_indent}{name}")
-    print(f"{inner_indent}{describe_block_cardinality(block_type)}")
+    print(f"{inner_indent}Name: {name}")
+    for line in format_block_cardinality_lines(block_type):
+        print(f"{inner_indent}{line}")
 
     # Purpose: the provider's own description (if any), plus our
     # plain-language explanation for known or unknown blocks.
@@ -1368,6 +1354,8 @@ def print_one_block_type(
         indent_level + 2,
         item_kind=item_kind,
         fields_heading="Fields:",
+        show_nested=show_nested,
+        show_filters=show_filters,
     )
 
 
@@ -1384,6 +1372,9 @@ def print_block(
     indent_level: int = 0,
     item_kind: str | None = None,
     fields_heading: str | None = None,
+    *,
+    show_nested: bool = False,
+    show_filters: bool = False,
 ) -> None:
     """
     Print the attributes and nested blocks of ONE block, recursively.
@@ -1394,6 +1385,9 @@ def print_block(
     ``item_kind`` ("resource" / "datasource") lets data-source lookup
     blocks be labelled correctly.  ``fields_heading`` replaces the
     default attributes heading when printing nested block Fields.
+
+    Nested configuration / timeouts need ``show_nested``; lookup filters
+    need ``show_filters``.  Both default off.
     """
     # Two spaces per level.  " " * 4 means four spaces, and so on.
     indent = "  " * indent_level
@@ -1490,6 +1484,15 @@ def print_block(
         print(f"{indent}(no entries match --show {show})")
 
     # --- Nested blocks at this level -----------------------------------
+    # configuration + timeouts need -n/--nested; filters need -f/--filters.
+    allowed_categories: set[str] = set()
+    if show_nested:
+        allowed_categories.update({"configuration", "timeouts"})
+    if show_filters:
+        allowed_categories.add("lookup_filter")
+    if not allowed_categories:
+        return
+
     all_block_types = block.get("block_types", {})
 
     # Keep only the blocks that match the current --show choice.
@@ -1515,7 +1518,8 @@ def print_block(
     }
     for name in sorted(visible_block_types):
         category = classify_block(name, item_kind)
-        names_by_category[category].append(name)
+        if category in allowed_categories:
+            names_by_category[category].append(name)
 
     for category, heading in group_headings:
         block_names = names_by_category[category]
@@ -1531,6 +1535,8 @@ def print_block(
                 show,
                 indent_level,
                 item_kind,
+                show_nested=show_nested,
+                show_filters=show_filters,
             )
 
 
@@ -1568,12 +1574,21 @@ def print_item_metadata(item: ProviderItem) -> None:
         )
 
 
-def print_item_details(item: ProviderItem, show: str) -> None:
+def print_item_details(
+    item: ProviderItem,
+    show: str,
+    *,
+    show_nested: bool = False,
+    show_filters: bool = False,
+) -> None:
     """
     Print a clear heading, then the chosen details for one item.
 
     The provider is deliberately NOT printed here: callers print it
     once, as a section heading above one or more items.
+
+    ``show_nested`` / ``show_filters`` control which nested block
+    groups are printed (off by default).
     """
     # A line of "=" characters, as long as the heading text.
     if item.kind == "provider":
@@ -1588,7 +1603,13 @@ def print_item_details(item: ProviderItem, show: str) -> None:
 
     # Pass the kind along so nested blocks can be labelled correctly
     # (for example, a data-source "filter" block is a lookup filter).
-    print_block(item.block, show, item_kind=item.kind)
+    print_block(
+        item.block,
+        show,
+        item_kind=item.kind,
+        show_nested=show_nested,
+        show_filters=show_filters,
+    )
 
 
 def print_function_details(item: FunctionItem) -> None:
@@ -1767,9 +1788,12 @@ def handle_search(
     functions: list[FunctionItem],
     keyword: str,
     show: str | None,
+    *,
+    show_nested: bool = False,
+    show_filters: bool = False,
 ) -> int:
     """
-    Handle:  search KEYWORD [--show all|required|optional|attributes]
+    Handle:  search KEYWORD [--show ...] [-n] [-f]
 
     Without ``--show``, this only lists the matches.
     With ``--show``, the user picks a match and we display its details.
@@ -1813,7 +1837,12 @@ def handle_search(
 
     # The provider heading was already printed above, in the results
     # list, so the details do not repeat it.
-    print_item_details(chosen, show)
+    print_item_details(
+        chosen,
+        show,
+        show_nested=show_nested,
+        show_filters=show_filters,
+    )
     return 0
 
 
@@ -1849,9 +1878,12 @@ def handle_show(
     name: str,
     kind: str | None,
     show: str,
+    *,
+    show_nested: bool = False,
+    show_filters: bool = False,
 ) -> int:
     """
-    Handle:  show NAME [--kind resource|datasource|ephemeral|function] [--show ...]
+    Handle:  show NAME [--kind ...] [--show ...] [-n] [-f]
 
     ``NAME`` must match exactly, e.g. ``aws_instance``.
     If nothing matches exactly, we fall back to a keyword search so the
@@ -1875,7 +1907,12 @@ def handle_show(
         for provider, provider_items in group_items_by_provider(exact_matches):
             print_provider_heading(provider)
             for item in provider_items:
-                print_item_details(item, show)
+                print_item_details(
+                    item,
+                    show,
+                    show_nested=show_nested,
+                    show_filters=show_filters,
+                )
         return 0
 
     # No exact match: be helpful and offer the closest keyword matches.
@@ -1894,7 +1931,12 @@ def handle_show(
         displayed_suggestions = print_items_list(suggestions, "Similar names")
         chosen = choose_item_from_list(displayed_suggestions)
         if chosen is not None:
-            print_item_details(chosen, show)
+            print_item_details(
+                chosen,
+                show,
+                show_nested=show_nested,
+                show_filters=show_filters,
+            )
     if function_suggestions:
         print("\nMatching functions:")
         handle_list_functions(function_suggestions)
@@ -1928,9 +1970,12 @@ def handle_provider(
     schema: dict,
     name: str,
     show: str,
+    *,
+    show_nested: bool = False,
+    show_filters: bool = False,
 ) -> int:
     """
-    Handle:  provider NAME [--show all|required|optional|attributes]
+    Handle:  provider NAME [--show ...] [-n] [-f]
 
     Shows the configuration arguments of ``provider "NAME" { ... }``.
     """
@@ -1948,8 +1993,29 @@ def handle_provider(
 
     for config in matches:
         print_provider_heading(config.provider)
-        print_item_details(config, show)
+        print_item_details(
+            config,
+            show,
+            show_nested=show_nested,
+            show_filters=show_filters,
+        )
     return 0
+
+
+def add_nested_block_flags(parser: argparse.ArgumentParser) -> None:
+    """Add -n/--nested and -f/--filters to a show-like subcommand."""
+    parser.add_argument(
+        "-n",
+        "--nested",
+        action="store_true",
+        help="Include nested configuration blocks (and timeouts).",
+    )
+    parser.add_argument(
+        "-f",
+        "--filters",
+        action="store_true",
+        help="Include data-source lookup filter blocks.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1975,9 +2041,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s search ec2\n"
             "  %(prog)s search bucket --show optional\n"
             "  %(prog)s show aws_instance --show required\n"
-            "  %(prog)s show aws_ami --kind datasource --show attributes\n"
+            "  %(prog)s show aws_instance -n\n"
+            "  %(prog)s show aws_ami --kind datasource -f\n"
             "  %(prog)s show cidr_contains --kind function\n"
-            "  %(prog)s provider aws --show all\n"
+            "  %(prog)s provider aws --show all -n\n"
             "  %(prog)s --demo show fake_server --show all\n"
             "  %(prog)s --self-test\n"
         ),
@@ -2034,6 +2101,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,  # None means: only list matches, do not open one.
         help="After listing, open one match and show this view of it.",
     )
+    add_nested_block_flags(search_parser)
 
     # --- Command: show --------------------------------------------------
     show_parser = subparsers.add_parser(
@@ -2056,6 +2124,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="What to show (default: all).",
     )
+    add_nested_block_flags(show_parser)
 
     # --- Command: provider ----------------------------------------------
     provider_parser = subparsers.add_parser(
@@ -2073,6 +2142,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="What to show (default: all).",
     )
+    add_nested_block_flags(provider_parser)
 
     return parser
 
@@ -2117,7 +2187,13 @@ def main(argv: list[str] | None = None) -> int:
     # The provider command only needs the schema; everything else needs
     # at least one item or function.
     if args.command == "provider":
-        return handle_provider(schema, name=args.name, show=args.show)
+        return handle_provider(
+            schema,
+            name=args.name,
+            show=args.show,
+            show_nested=args.nested,
+            show_filters=args.filters,
+        )
 
     if not items and not functions:
         print(
@@ -2140,6 +2216,8 @@ def main(argv: list[str] | None = None) -> int:
             functions,
             keyword=args.keyword,
             show=args.show,
+            show_nested=args.nested,
+            show_filters=args.filters,
         )
 
     if args.command == "show":
@@ -2149,6 +2227,8 @@ def main(argv: list[str] | None = None) -> int:
             name=args.name,
             kind=args.kind,
             show=args.show,
+            show_nested=args.nested,
+            show_filters=args.filters,
         )
 
     # argparse restricts the command to the choices above, so reaching
@@ -2790,7 +2870,9 @@ class TestPrintedOutput(unittest.TestCase):
     def test_nested_block_attributes_use_an_indented_table(self):
         items = collect_items(make_fake_schema())
         server = find_exact_items(items, "fake_server")[0]
-        _result, output = capture_output(print_item_details, server, "all")
+        _result, output = capture_output(
+            print_item_details, server, "all", show_nested=True
+        )
         lines = output.splitlines()
 
         # The nested "disk" block contains "gb": its row is indented,
@@ -2805,6 +2887,13 @@ class TestPrintedOutput(unittest.TestCase):
         self.assertGreaterEqual(len(header_lines), 3)
         self.assertTrue(any(line.startswith("    ") for line in header_lines))
 
+    def test_default_show_hides_nested_blocks(self):
+        items = collect_items(make_fake_schema())
+        server = find_exact_items(items, "fake_server")[0]
+        _result, output = capture_output(print_item_details, server, "all")
+        self.assertNotIn("Nested configuration blocks:", output)
+        self.assertNotIn("Name: disk", output)
+
 
 class TestNestedBlocks(unittest.TestCase):
     """Tests for plain-language nested block explanations."""
@@ -2813,32 +2902,39 @@ class TestNestedBlocks(unittest.TestCase):
         cases = [
             (
                 {"nesting_mode": "single"},
-                "Optional block; may appear at most once.",
+                ["Optional: yes", "Repeated: no"],
             ),
             (
                 {"nesting_mode": "set", "min_items": 0},
-                "Optional block; may be repeated. Each block must be unique.",
+                ["Optional: yes", "Repeated: yes"],
             ),
             (
                 {"nesting_mode": "list", "min_items": 0, "max_items": 3},
-                "Optional block; may be repeated up to 3 times.",
+                ["Optional: yes", "Repeated: yes"],
+            ),
+            (
+                {"nesting_mode": "list", "min_items": 0, "max_items": 1},
+                ["Optional: yes", "Repeated: no"],
             ),
             (
                 {"nesting_mode": "list", "min_items": 1},
-                "Required block; at least 1 must be provided.",
+                ["Optional: no", "Repeated: yes"],
             ),
             (
                 {"nesting_mode": "single", "min_items": 1, "max_items": 1},
-                "Required block; exactly one must be provided.",
+                ["Optional: no", "Repeated: no"],
             ),
             (
                 {"nesting_mode": "list", "min_items": 2, "max_items": 4},
-                "Required block; at least 2 must be provided, and no more than 4.",
+                ["Optional: no", "Repeated: yes"],
             ),
         ]
         for block_type, expected in cases:
             with self.subTest(block_type=block_type):
-                self.assertEqual(describe_block_cardinality(block_type), expected)
+                self.assertEqual(
+                    format_block_cardinality_lines(block_type),
+                    expected,
+                )
 
     def test_is_block_required(self):
         self.assertTrue(is_block_required({"min_items": 1}))
@@ -2874,14 +2970,25 @@ class TestNestedBlocks(unittest.TestCase):
         items = collect_items(make_fake_schema())
         functions = collect_functions(make_fake_schema())
         _result, output = capture_output(
-            handle_show, items, functions, "fake_image", "datasource", "all"
+            handle_show,
+            items,
+            functions,
+            "fake_image",
+            "datasource",
+            "all",
+            show_nested=True,
+            show_filters=True,
         )
 
         # Grouped, explained sections -- not raw schema wording.
         self.assertIn("Lookup filter blocks:", output)
         self.assertIn("Provider operation timeouts:", output)
-        self.assertIn("Optional block; may be repeated. Each block must be unique.", output)
-        self.assertIn("Optional block; may appear at most once.", output)
+        self.assertIn("Name: filter", output)
+        self.assertIn("Name: timeouts", output)
+        self.assertIn("Optional: yes", output)
+        self.assertIn("Repeated: yes", output)
+        self.assertIn("Repeated: no", output)
+        self.assertNotIn("Each block must be unique", output)
         self.assertIn("Narrows the data-source lookup", output)
         self.assertIn("Fields:", output)
         self.assertNotIn("required only if you write this block", output)
@@ -2906,15 +3013,43 @@ class TestNestedBlocks(unittest.TestCase):
         self.assertNotIn("block (single", output)
 
         # Lookup filters are shown before provider operation timeouts.
-        self.assertLess(output.index("Lookup filter blocks:"), output.index("Provider operation timeouts:"))
+        self.assertLess(
+            output.index("Lookup filter blocks:"),
+            output.index("Provider operation timeouts:"),
+        )
+
+    def test_filters_flag_only_shows_filters(self):
+        items = collect_items(make_fake_schema())
+        image = find_exact_items(items, "fake_image")[0]
+        _result, output = capture_output(
+            print_item_details, image, "all", show_filters=True
+        )
+        self.assertIn("Lookup filter blocks:", output)
+        self.assertIn("Name: filter", output)
+        self.assertNotIn("Provider operation timeouts:", output)
+        self.assertNotIn("Name: timeouts", output)
+
+    def test_nested_flag_shows_timeouts_not_filters(self):
+        items = collect_items(make_fake_schema())
+        image = find_exact_items(items, "fake_image")[0]
+        _result, output = capture_output(
+            print_item_details, image, "all", show_nested=True
+        )
+        self.assertIn("Provider operation timeouts:", output)
+        self.assertIn("Name: timeouts", output)
+        self.assertNotIn("Lookup filter blocks:", output)
 
     def test_unknown_block_uses_neutral_explanation(self):
         items = collect_items(make_fake_schema())
         server = find_exact_items(items, "fake_server")[0]
-        _result, output = capture_output(print_item_details, server, "all")
+        _result, output = capture_output(
+            print_item_details, server, "all", show_nested=True
+        )
 
         self.assertIn("Nested configuration blocks:", output)
-        self.assertIn("Required block; at least 1 must be provided.", output)
+        self.assertIn("Name: disk", output)
+        self.assertIn("Optional: no", output)
+        self.assertIn("Repeated: yes", output)
         self.assertIn("Provider-defined nested configuration block.", output)
         self.assertNotIn("block (list", output)
 

@@ -65,7 +65,7 @@ schema JSON (Terraform / file / --demo)
 
 - `print_items_list()` — numbered list by provider
 - `print_attribute_table()` — args: NAME / TYPE / REQ / OPT / SENS; returned: NAME / TYPE / SENS; Fields: NAME / TYPE / REQ / OPT
-- `print_block()` / `print_one_block_type()` — nested blocks (config, filter, timeouts)
+- `print_block()` / `print_one_block_type()` — nested blocks gated by `-n` (config/timeouts) and `-f` (filters); `Name:` / Optional / Repeated
 - `print_nested_attributes()` — `nested_type` fields under a parent
 - `print_item_details()` / `print_function_details()` — one item or function
 
