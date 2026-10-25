@@ -83,8 +83,8 @@ Shows one exact name. Use `--kind` when the same name exists as more than
 one kind. `--show` filters fields: `all`, `required`, `optional`,
 `attributes`.
 
-Shows: that item’s arguments, attributes, and nested blocks (as
-applicable).
+Shows: lookup/configuration arguments and returned attributes in
+separate sections, plus nested blocks (as applicable).
 
 ```bash
 tfview show aws_instance
