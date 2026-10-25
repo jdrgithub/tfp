@@ -114,9 +114,12 @@ from pathlib import Path  # A clean, modern way to work with file paths.
 # ---------------------------------------------------------------------------
 # By convention, constant names are written in ALL_CAPS.
 
-# Column headings for top-level argument / returned-attribute tables.
+# Column headings for Lookup / Configuration argument tables.
 # Flag columns use a short heading and an "X" marker (see FLAG_MARKER).
 ATTRIBUTE_HEADERS = ("NAME", "TYPE", "REQ", "OPT", "SENS")
+
+# Returned attributes: no REQ/OPT (those only apply to configuration).
+RETURNED_HEADERS = ("NAME", "TYPE", "SENS")
 
 # Slimmer headings for nested block Fields tables (no SENS).
 FIELDS_HEADERS = ("NAME", "TYPE", "REQ", "OPT")
@@ -129,6 +132,9 @@ FLAG_LEGEND = (
     "Markers: X = yes  "
     "(REQ = required, OPT = optional, SENS = sensitive)"
 )
+
+# Used when the first (or only) top-level table is Returned attributes.
+RETURNED_FLAG_LEGEND = "Markers: X = yes  (SENS = sensitive)"
 
 # Function-parameter DESCRIPTION column is capped and wrapped.  Attribute
 # table NAME and TYPE grow to the widest entry so every row lines up.
@@ -841,7 +847,7 @@ def format_attribute_type(attribute: dict) -> str:
 
 def build_attribute_row(name: str, attribute: dict) -> tuple[str, ...]:
     """
-    Build one row of a top-level attribute table.
+    Build one row of a Lookup / Configuration arguments table.
 
     The cells follow ATTRIBUTE_HEADERS, in the same order:
     Name, Type, REQ, OPT, SENS.
@@ -854,6 +860,20 @@ def build_attribute_row(name: str, attribute: dict) -> tuple[str, ...]:
         format_attribute_type(attribute),
         FLAG_MARKER if is_required(attribute) else "",
         FLAG_MARKER if is_optional(attribute) else "",
+        FLAG_MARKER if is_sensitive(attribute) else "",
+    )
+
+
+def build_returned_row(name: str, attribute: dict) -> tuple[str, ...]:
+    """
+    Build one row of a Returned attributes table.
+
+    The cells follow RETURNED_HEADERS: Name, Type, SENS.
+    REQ/OPT are omitted — returned values are not configuration flags.
+    """
+    return (
+        name,
+        format_attribute_type(attribute),
         FLAG_MARKER if is_sensitive(attribute) else "",
     )
 
@@ -1184,20 +1204,25 @@ def print_attribute_table(
     *,
     show_legend: bool = False,
     fields_table: bool = False,
+    returned_table: bool = False,
 ) -> None:
     """
     Print attributes as an aligned table.
 
-    Top-level columns: NAME, TYPE, REQ, OPT, SENS.
+    Arguments columns: NAME, TYPE, REQ, OPT, SENS.
+    Returned columns: NAME, TYPE, SENS.
     Nested Fields columns: NAME, TYPE, REQ, OPT.
 
-    ``show_legend`` prints FLAG_LEGEND above the table (once per show,
-    from the caller).  Flag columns use an X marker.  NAME and TYPE grow
-    to the widest entry in the table.
+    ``show_legend`` prints a markers legend above the table (once per
+    show, from the caller).  Flag columns use an X marker.  NAME and
+    TYPE grow to the widest entry in the table.
     """
     indent = "  " * indent_level
     if show_legend:
-        print(f"{indent}{FLAG_LEGEND}")
+        if returned_table:
+            print(f"{indent}{RETURNED_FLAG_LEGEND}")
+        else:
+            print(f"{indent}{FLAG_LEGEND}")
 
     if fields_table:
         headers = FIELDS_HEADERS
@@ -1210,6 +1235,17 @@ def print_attribute_table(
             None,  # TYPE
             None,  # REQ
             None,  # OPT
+        )
+    elif returned_table:
+        headers = RETURNED_HEADERS
+        rows = [
+            build_returned_row(name, attributes[name])
+            for name in sorted(attributes)
+        ]
+        max_widths = (
+            None,  # NAME
+            None,  # TYPE
+            None,  # SENS
         )
     else:
         headers = ATTRIBUTE_HEADERS
@@ -1407,6 +1443,7 @@ def print_block(
                     returned,
                     indent_level,
                     show_legend=not legend_printed,
+                    returned_table=True,
                 )
 
             # Expand nested_type once, even when a dual field appears
@@ -1420,14 +1457,21 @@ def print_block(
             # Filtered --show: one table with the matching section title.
             if show == "attributes":
                 heading = "Returned attributes:"
+                print(f"{indent}{heading}")
+                print_attribute_table(
+                    visible_attributes,
+                    indent_level,
+                    show_legend=True,
+                    returned_table=True,
+                )
             else:
                 heading = _arguments_heading(item_kind)
-            print(f"{indent}{heading}")
-            print_attribute_table(
-                visible_attributes,
-                indent_level,
-                show_legend=True,
-            )
+                print(f"{indent}{heading}")
+                print_attribute_table(
+                    visible_attributes,
+                    indent_level,
+                    show_legend=True,
+                )
             print_nested_attributes(
                 visible_attributes,
                 show,
@@ -2699,6 +2743,22 @@ class TestPrintedOutput(unittest.TestCase):
         returned_section = output[returned_at:]
         self.assertIn("tags", args_section)
         self.assertIn("tags", returned_section)
+
+        # Arguments keep REQ/OPT; returned attributes do not.
+        args_header = next(
+            line for line in args_section.splitlines() if line.startswith("NAME")
+        )
+        returned_header = next(
+            line
+            for line in returned_section.splitlines()
+            if line.startswith("NAME")
+        )
+        self.assertIn("OPT", args_header)
+        self.assertIn("REQ", args_header)
+        self.assertNotIn("OPT", returned_header)
+        self.assertNotIn("REQ", returned_header)
+        self.assertIn("SENS", returned_header)
+
         args_id_rows = [
             line for line in args_section.splitlines() if line.startswith("id ")
         ]
