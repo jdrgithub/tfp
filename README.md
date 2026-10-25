@@ -81,17 +81,21 @@ tfview --demo search fake --show required
 
 Shows one exact name. Use `--kind` when the same name exists as more than
 one kind. `--show` filters fields: `all`, `required`, `optional`,
-`attributes`.
+`attributes`. Nested configuration blocks need `-n` / `--nested`;
+data-source lookup filters need `-f` / `--filters`.
 
 Shows: lookup/configuration arguments and returned attributes in
-separate sections, plus nested blocks (as applicable).
+separate sections. With `-n` / `-f`, also nested blocks as requested.
 
 ```bash
 tfview show aws_instance
 tfview show aws_instance --show required
 tfview show aws_instance --show optional
 tfview show aws_instance --show attributes
+tfview show aws_instance -n
 tfview show aws_ami --kind datasource --show all
+tfview show aws_ami --kind datasource -f
+tfview show aws_ami --kind datasource -n -f
 tfview show cidr_contains --kind function
 tfview show temporary_password --kind ephemeral
 ```
@@ -100,8 +104,11 @@ Demo:
 
 ```bash
 tfview --demo show fake_server --show all
+tfview --demo show fake_server --show all -n
 tfview --demo show fake_server --show required
 tfview --demo show fake_image --kind datasource --show all
+tfview --demo show fake_image --kind datasource -f
+tfview --demo show fake_image --kind datasource -n -f
 tfview --demo show cidr_contains --kind function
 tfview --demo show temporary_password --kind ephemeral
 ```
@@ -110,11 +117,13 @@ tfview --demo show temporary_password --kind ephemeral
 
 Shows the schema for `provider "NAME" { ... }` configuration.
 
-Shows: that provider’s configuration arguments and nested blocks.
+Shows: that provider’s configuration arguments. Use `-n` for nested
+provider blocks.
 
 ```bash
 tfview provider aws
 tfview provider aws --show required
+tfview provider aws -n
 ```
 
 Demo:
